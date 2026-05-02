@@ -16,16 +16,26 @@ pip install trusted-router-py
 ## Usage
 
 ```python
-from trustedrouter import TrustedRouter
+from trustedrouter import AUTO_MODEL, TrustedRouter
 
 client = TrustedRouter(api_key="sk-tr-v1-...")
 
 response = client.chat_completions(
-    model="trustedrouter/auto",
+    model=AUTO_MODEL,
     messages=[{"role": "user", "content": "hello"}],
 )
 
 print(response["choices"][0]["message"]["content"])
+```
+
+`trustedrouter/auto` is the default high-level chat model in the SDK. It maps to
+TrustedRouter's provider rollover route.
+
+```python
+regions = client.regions()
+checkout = client.stablecoin_checkout(amount=25)
+session = client.google_auth(credential="google-id-token")
+challenge = client.wallet_challenge("0x...")
 ```
 
 The SDK intentionally uses OpenAI-compatible request and response shapes. Use
