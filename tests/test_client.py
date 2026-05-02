@@ -73,7 +73,6 @@ def test_checkout_and_auth_helpers_send_expected_shapes() -> None:
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
 
     client.stablecoin_checkout(amount=25, workspace_id="ws_1")
-    client.google_auth(email="alice@example.com", name="Alice")
     client.wallet_challenge("0x0000000000000000000000000000000000000001")
     client.wallet_verify(address="0x1", message="m", signature="sig")
 
@@ -82,13 +81,8 @@ def test_checkout_and_auth_helpers_send_expected_shapes() -> None:
         f"{DEFAULT_API_BASE_URL}/billing/checkout",
         {"amount": 25, "payment_method": "stablecoin", "workspace_id": "ws_1"},
     )
-    assert calls[1] == (
-        "POST",
-        f"{DEFAULT_API_BASE_URL}/auth/google",
-        {"email": "alice@example.com", "name": "Alice"},
-    )
-    assert calls[2][1] == f"{DEFAULT_API_BASE_URL}/auth/wallet/challenge"
-    assert calls[3] == (
+    assert calls[1][1] == f"{DEFAULT_API_BASE_URL}/auth/wallet/challenge"
+    assert calls[2] == (
         "POST",
         f"{DEFAULT_API_BASE_URL}/auth/wallet/verify",
         {"address": "0x1", "message": "m", "signature": "sig"},

@@ -296,26 +296,6 @@ class TrustedRouter:
     def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
         return self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
 
-    def google_auth(
-        self,
-        *,
-        credential: str | None = None,
-        email: str | None = None,
-        name: str | None = None,
-        sub: str | None = None,
-    ) -> dict[str, Any]:
-        body = {
-            key: value
-            for key, value in {
-                "credential": credential,
-                "email": email,
-                "name": name,
-                "sub": sub,
-            }.items()
-            if value is not None
-        }
-        return self.request("POST", "/auth/google", json=body)
-
     def wallet_challenge(self, address: str) -> dict[str, Any]:
         return self.request("POST", "/auth/wallet/challenge", json={"address": address})
 
@@ -552,26 +532,6 @@ class AsyncTrustedRouter:
 
     async def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
         return await self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
-
-    async def google_auth(
-        self,
-        *,
-        credential: str | None = None,
-        email: str | None = None,
-        name: str | None = None,
-        sub: str | None = None,
-    ) -> dict[str, Any]:
-        body = {
-            key: value
-            for key, value in {
-                "credential": credential,
-                "email": email,
-                "name": name,
-                "sub": sub,
-            }.items()
-            if value is not None
-        }
-        return await self.request("POST", "/auth/google", json=body)
 
     async def wallet_challenge(self, address: str) -> dict[str, Any]:
         return await self.request("POST", "/auth/wallet/challenge", json={"address": address})

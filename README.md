@@ -34,7 +34,6 @@ TrustedRouter's provider rollover route.
 ```python
 regions = client.regions()
 checkout = client.stablecoin_checkout(amount=25)
-session = client.google_auth(credential="google-id-token")
 challenge = client.wallet_challenge("0x...")
 ```
 
