@@ -296,16 +296,6 @@ class TrustedRouter:
     def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
         return self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
 
-    def wallet_challenge(self, address: str) -> dict[str, Any]:
-        return self.request("POST", "/auth/wallet/challenge", json={"address": address})
-
-    def wallet_verify(self, *, address: str, message: str, signature: str) -> dict[str, Any]:
-        return self.request(
-            "POST",
-            "/auth/wallet/verify",
-            json={"address": address, "message": message, "signature": signature},
-        )
-
     def auth_session(self) -> dict[str, Any]:
         return self.request("GET", "/auth/session")
 
@@ -532,16 +522,6 @@ class AsyncTrustedRouter:
 
     async def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
         return await self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
-
-    async def wallet_challenge(self, address: str) -> dict[str, Any]:
-        return await self.request("POST", "/auth/wallet/challenge", json={"address": address})
-
-    async def wallet_verify(self, *, address: str, message: str, signature: str) -> dict[str, Any]:
-        return await self.request(
-            "POST",
-            "/auth/wallet/verify",
-            json={"address": address, "message": message, "signature": signature},
-        )
 
     async def auth_session(self) -> dict[str, Any]:
         return await self.request("GET", "/auth/session")

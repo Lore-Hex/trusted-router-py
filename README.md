@@ -34,7 +34,6 @@ TrustedRouter's provider rollover route.
 ```python
 regions = client.regions()
 checkout = client.stablecoin_checkout(amount=25)
-challenge = client.wallet_challenge("0x...")
 ```
 
 The SDK intentionally uses OpenAI-compatible request and response shapes. Use
