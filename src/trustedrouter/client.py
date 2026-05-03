@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json as jsonlib
+import platform
+import random
+import sys
+import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 
@@ -10,12 +15,147 @@ DEFAULT_API_BASE_URL = "https://api.quillrouter.com/v1"
 DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
 AUTO_MODEL = "trustedrouter/auto"
 
+# Region routing — see https://trust.trustedrouter.com for the live list.
+# Apex (`api.quillrouter.com`) is currently us-central1, so we treat the
+# us-central1 entry as an alias of the apex until a regional subdomain
+# for it is published.
+REGION_HOSTS: dict[str, str] = {
+    "us-central1": "api.quillrouter.com",
+    "europe-west4": "api-europe-west4.quillrouter.com",
+}
+
+
+def region_base_url(region: str) -> str:
+    """Return the OpenAI-compatible /v1 base URL for a TrustedRouter region.
+
+    Raises ValueError if the region isn't in REGION_HOSTS — callers that
+    want to opt into an unpublished regional gateway should pass the full
+    `base_url=...` to the client constructor instead."""
+    if region not in REGION_HOSTS:
+        known = ", ".join(sorted(REGION_HOSTS))
+        raise ValueError(f"unknown TrustedRouter region {region!r}; known: {known}")
+    return f"https://{REGION_HOSTS[region]}/v1"
+
+
+def _user_agent() -> str:
+    # Lazy: read __version__ from the installed package metadata so the
+    # UA stays in sync with whatever PyPI has, without import-cycling on
+    # the package's __init__.py.
+    try:
+        from importlib.metadata import version as _v
+
+        v = _v("trusted-router-py")
+    except Exception:  # noqa: BLE001
+        v = "unknown"
+    py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    return f"trusted-router-py/{v} python/{py} httpx/{httpx.__version__} {platform.system()}"
+
+
+_DEFAULT_USER_AGENT = _user_agent()
+
+
+# ---- error hierarchy ------------------------------------------------------
+
 
 class TrustedRouterError(RuntimeError):
+    """Base for all SDK-raised errors. Subclasses discriminate by HTTP
+    status so callers can `except RateLimitError` / `except AuthenticationError`
+    without inspecting numeric status codes."""
+
     def __init__(self, status_code: int, message: str, *, payload: Any | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+
+
+class BadRequestError(TrustedRouterError):
+    """4xx-class request error (mostly 400, 422). Body is malformed or
+    rejected by the gateway/model."""
+
+
+class AuthenticationError(TrustedRouterError):
+    """401 — bearer token is missing, malformed, or revoked."""
+
+
+class PermissionDeniedError(TrustedRouterError):
+    """403 — bearer is valid but lacks scope for this resource."""
+
+
+class NotFoundError(TrustedRouterError):
+    """404 — the model, region, or resource doesn't exist."""
+
+
+class RateLimitError(TrustedRouterError):
+    """429 — slow down. `retry_after` is the value of the Retry-After
+    header in seconds, or None if the gateway didn't send one."""
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        payload: Any | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(status_code, message, payload=payload)
+        self.retry_after = retry_after
+
+
+class InternalError(TrustedRouterError):
+    """5xx — gateway or upstream model failure. These are the requests
+    the SDK retries automatically (see `max_retries`)."""
+
+
+def _classify_error(
+    status_code: int, message: str, *, payload: Any | None, retry_after: float | None
+) -> TrustedRouterError:
+    if status_code == 401:
+        return AuthenticationError(status_code, message, payload=payload)
+    if status_code == 403:
+        return PermissionDeniedError(status_code, message, payload=payload)
+    if status_code == 404:
+        return NotFoundError(status_code, message, payload=payload)
+    if status_code == 429:
+        return RateLimitError(status_code, message, payload=payload, retry_after=retry_after)
+    if 400 <= status_code < 500:
+        return BadRequestError(status_code, message, payload=payload)
+    if status_code >= 500:
+        return InternalError(status_code, message, payload=payload)
+    return TrustedRouterError(status_code, message, payload=payload)
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Parse Retry-After. Per RFC 7231 it can be either an integer number
+    of seconds OR an HTTP-date; we only honor the integer form because
+    the gateway only emits that and the date form is rarely useful for
+    short retries."""
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw.strip()))
+    except ValueError:
+        return None
+
+
+# ---- retry policy --------------------------------------------------------
+
+
+def _retryable(status_code: int) -> bool:
+    """Which responses the SDK retries by default. 429 + 5xx are safe
+    to retry idempotently; the gateway is responsible for 5xx-on-write
+    being safe (its writes are idempotent or the response is 4xx)."""
+    return status_code == 429 or status_code >= 500
+
+
+def _retry_sleep(attempt: int, *, retry_after: float | None) -> float:
+    """Exponential backoff with full jitter, capped at 30 s. If the
+    server gave us a Retry-After hint, honor that as the floor."""
+    base = min(30.0, 0.5 * (2**attempt))
+    delay = random.uniform(0, base)  # noqa: S311  not crypto
+    if retry_after is not None:
+        delay = max(delay, retry_after)
+    return delay
 
 
 # ---- shared streaming helpers --------------------------------------------
@@ -28,14 +168,29 @@ def _build_stream_request(
     body: Mapping[str, Any] | None,
     api_key: str | None,
     extra_headers: Mapping[str, str] | None,
+    idempotency_key: str | None = None,
+    timeout: float | httpx.Timeout | None = None,
 ) -> dict[str, Any]:
-    headers: dict[str, str] = {"accept": "text/event-stream"}
+    headers: dict[str, str] = {
+        "accept": "text/event-stream",
+        "user-agent": _DEFAULT_USER_AGENT,
+    }
     if extra_headers:
         headers.update(extra_headers)
+    if idempotency_key:
+        headers["idempotency-key"] = idempotency_key
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     payload: Mapping[str, Any] | None = body
-    return {"method": method, "url": url, "json": payload, "headers": headers}
+    request: dict[str, Any] = {
+        "method": method,
+        "url": url,
+        "json": payload,
+        "headers": headers,
+    }
+    if timeout is not None:
+        request["timeout"] = timeout
+    return request
 
 
 def _parse_sse_line(line: str) -> dict[str, Any] | None:
@@ -76,6 +231,30 @@ async def _aiter_sse_chunks(response: httpx.Response) -> AsyncIterator[dict[str,
         chunk = _parse_sse_line(line)
         if chunk is not None:
             yield chunk
+
+
+def _raise_for_stream_response(response: httpx.Response) -> None:
+    """Translate a 4xx/5xx response (during stream open) into the
+    appropriate typed error subclass — same hierarchy `_json_or_raise`
+    uses for non-streaming requests, so callers can `except RateLimitError`
+    consistently."""
+    detail = response.read().decode("utf-8", errors="replace")[:240]
+    raise _classify_error(
+        response.status_code,
+        detail,
+        payload=None,
+        retry_after=_retry_after_seconds(response.headers),
+    )
+
+
+async def _araise_for_stream_response(response: httpx.Response) -> None:
+    detail = (await response.aread()).decode("utf-8", errors="replace")[:240]
+    raise _classify_error(
+        response.status_code,
+        detail,
+        payload=None,
+        retry_after=_retry_after_seconds(response.headers),
+    )
 
 
 def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -130,20 +309,44 @@ class TrustedRouter:
         self,
         api_key: str | None = None,
         *,
-        base_url: str = DEFAULT_API_BASE_URL,
+        base_url: str | None = None,
+        region: str | None = None,
         timeout: float = 120.0,
         headers: Mapping[str, str] | None = None,
         client: httpx.Client | None = None,
+        max_retries: int = 2,
     ) -> None:
+        """Sync TrustedRouter client.
+
+        Either pass `region="europe-west4"` (or another known region) for
+        a one-line regional pin, OR pass `base_url=...` for a custom
+        endpoint (e.g. a self-hosted gateway). Passing both is a
+        configuration error. With neither, the client uses the apex
+        `api.quillrouter.com/v1` (currently us-central1).
+
+        `max_retries` controls automatic retry of 429 / 5xx responses
+        with exponential backoff + jitter. Set to 0 to disable retries
+        entirely (e.g. inside an outer retry loop)."""
+        if region is not None and base_url is not None:
+            raise ValueError("pass region= OR base_url=, not both")
+        if region is not None:
+            base_url = region_base_url(region)
+        if base_url is None:
+            base_url = DEFAULT_API_BASE_URL
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self.region = region
+        self.max_retries = max(0, int(max_retries))
+        default_headers = {"user-agent": _DEFAULT_USER_AGENT}
+        if headers:
+            default_headers.update(headers)
         if client is not None:
             # Caller is responsible for the client's lifecycle (timeouts,
             # transport, cert pinning, etc.). close() becomes a no-op.
             self._client = client
             self._owns_client = False
         else:
-            self._client = httpx.Client(timeout=timeout, headers=dict(headers or {}))
+            self._client = httpx.Client(timeout=timeout, headers=default_headers)
             self._owns_client = True
 
     def close(self) -> None:
@@ -163,17 +366,29 @@ class TrustedRouter:
         *,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
-        merged_headers = dict(headers or {})
+        merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
+        if headers:
+            merged_headers.update(headers)
+        if idempotency_key:
+            merged_headers["idempotency-key"] = idempotency_key
         if self.api_key:
             merged_headers["authorization"] = f"Bearer {self.api_key}"
-        response = self._client.request(
-            method,
-            f"{self.base_url}/{path.lstrip('/')}",
-            json=json,
-            headers=merged_headers,
-        )
-        return _json_or_raise(response)
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        # Retry 429 + 5xx with exponential backoff + jitter. Honors
+        # Retry-After when present.
+        attempt = 0
+        while True:
+            response = self._client.request(method, url, **kwargs)
+            if attempt >= self.max_retries or not _retryable(response.status_code):
+                return _json_or_raise(response)
+            time.sleep(_retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers)))
+            attempt += 1
 
     def _build_chat_request(
         self,
@@ -182,14 +397,25 @@ class TrustedRouter:
         messages: list[Mapping[str, Any]],
         api_key: str | None,
         params: Mapping[str, Any],
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
-        body = {"model": model, "messages": messages, "stream": True, **params}
+        # Pull our reserved kwargs out of `params` so they aren't sent
+        # into the JSON body. (Defensive: callers spreading a dict
+        # might inadvertently include these.)
+        params_dict = dict(params)
+        for reserved in ("extra_headers", "idempotency_key", "timeout", "api_key"):
+            params_dict.pop(reserved, None)
+        body = {"model": model, "messages": messages, "stream": True, **params_dict}
         return _build_stream_request(
             "POST",
             f"{self.base_url}/chat/completions",
             body=body,
             api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=None,
+            extra_headers=extra_headers,
+            idempotency_key=idempotency_key,
+            timeout=timeout,
         )
 
     def chat_completions_stream(
@@ -198,6 +424,9 @@ class TrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> Iterator[str]:
         """Yield assistant-message text deltas as they arrive. The gateway
@@ -205,15 +434,15 @@ class TrustedRouter:
         `stream` request param, so this is the lowest-overhead consumer.
 
         Pass `api_key` to override the instance-level key for this single
-        call — useful for validating user-supplied bearers without
-        mutating shared client state."""
+        call. Pass `extra_headers`, `idempotency_key`, or `timeout` to
+        tune the single request without recreating the client."""
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         with self._client.stream(**req) as response:
             if response.is_error:
-                detail = response.read().decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                _raise_for_stream_response(response)
             for chunk in _iter_sse_chunks(response):
                 txt = _delta_text(chunk)
                 if txt:
@@ -225,6 +454,9 @@ class TrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> Iterator[dict[str, Any]]:
         """Yield parsed OpenAI chat.completion.chunk dicts as they arrive.
@@ -232,12 +464,12 @@ class TrustedRouter:
         (e.g. `finish_reason`, `model`, `id`) — for instance when
         translating to a different SSE shape."""
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         with self._client.stream(**req) as response:
             if response.is_error:
-                detail = response.read().decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                _raise_for_stream_response(response)
             yield from _iter_sse_chunks(response)
 
     def chat_completions(
@@ -246,18 +478,21 @@ class TrustedRouter:
         model: str = AUTO_MODEL,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> dict[str, Any]:
         """Collect the streamed response into a single OpenAI-shape
         chat.completion dict. Use chat_completions_stream() if you want
         to stream tokens to the user instead."""
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         with self._client.stream(**req) as response:
             if response.is_error:
-                detail = response.read().decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                _raise_for_stream_response(response)
             chunks = list(_iter_sse_chunks(response))
         return _collect_completion(chunks)
 
@@ -273,6 +508,47 @@ class TrustedRouter:
     def credits(self) -> dict[str, Any]:
         return self.request("GET", "/credits")
 
+    def embeddings(
+        self,
+        *,
+        model: str,
+        input: str | list[str] | list[int] | list[list[int]],
+        encoding_format: str | None = None,
+        dimensions: int | None = None,
+        user: str | None = None,
+    ) -> dict[str, Any]:
+        """OpenAI-compatible embeddings. Routes through whichever
+        embedding-capable provider the catalog has registered for
+        `model` — see `client.models()` for the live list."""
+        body: dict[str, Any] = {"model": model, "input": input}
+        if encoding_format is not None:
+            body["encoding_format"] = encoding_format
+        if dimensions is not None:
+            body["dimensions"] = dimensions
+        if user is not None:
+            body["user"] = user
+        return self.request("POST", "/embeddings", json=body)
+
+    def messages(
+        self,
+        *,
+        model: str,
+        messages: list[Mapping[str, Any]],
+        max_tokens: int = 1024,
+        **params: Any,
+    ) -> dict[str, Any]:
+        """Anthropic-shape Messages endpoint. For providers that expose
+        the native Anthropic API (rather than translating to/from
+        OpenAI shape), this preserves system prompts, content blocks,
+        and tool_use semantics that the OpenAI shape can't carry."""
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            **params,
+        }
+        return self.request("POST", "/messages", json=body)
+
     def billing_checkout(
         self,
         *,
@@ -281,7 +557,11 @@ class TrustedRouter:
         workspace_id: str | None = None,
         success_url: str | None = None,
         cancel_url: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        """Create a Stripe checkout session. Pass `idempotency_key=` to
+        guarantee at-most-once charge semantics across network retries
+        — strongly recommended for production."""
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
             body["payment_method"] = payment_method
@@ -291,7 +571,9 @@ class TrustedRouter:
             body["success_url"] = success_url
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
-        return self.request("POST", "/billing/checkout", json=body)
+        return self.request(
+            "POST", "/billing/checkout", json=body, idempotency_key=idempotency_key
+        )
 
     def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
         return self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
@@ -303,6 +585,9 @@ class TrustedRouter:
         return self.request("POST", "/auth/logout")
 
     def activity(self, **params: Any) -> dict[str, Any]:
+        """List recent generations for the authenticated key/workspace.
+        Pass any subset of {since, until, limit, model, workspace_id};
+        None values are dropped from the query string."""
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
         return self.request("GET", f"/activity{suffix}")
@@ -337,14 +622,27 @@ class AsyncTrustedRouter:
         self,
         api_key: str | None = None,
         *,
-        base_url: str = DEFAULT_API_BASE_URL,
+        base_url: str | None = None,
+        region: str | None = None,
         timeout: float = 120.0,
         headers: Mapping[str, str] | None = None,
         verify: bool | str = True,
         client: httpx.AsyncClient | None = None,
+        max_retries: int = 2,
     ) -> None:
+        if region is not None and base_url is not None:
+            raise ValueError("pass region= OR base_url=, not both")
+        if region is not None:
+            base_url = region_base_url(region)
+        if base_url is None:
+            base_url = DEFAULT_API_BASE_URL
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self.region = region
+        self.max_retries = max(0, int(max_retries))
+        default_headers = {"user-agent": _DEFAULT_USER_AGENT}
+        if headers:
+            default_headers.update(headers)
         if client is not None:
             # Caller is responsible for the client's lifecycle (timeouts,
             # transport, verify, event hooks for cert pinning, etc.).
@@ -353,7 +651,7 @@ class AsyncTrustedRouter:
             self._owns_client = False
         else:
             self._client = httpx.AsyncClient(
-                timeout=timeout, headers=dict(headers or {}), verify=verify
+                timeout=timeout, headers=default_headers, verify=verify
             )
             self._owns_client = True
 
@@ -374,17 +672,29 @@ class AsyncTrustedRouter:
         *,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
-        merged_headers = dict(headers or {})
+        merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
+        if headers:
+            merged_headers.update(headers)
+        if idempotency_key:
+            merged_headers["idempotency-key"] = idempotency_key
         if self.api_key:
             merged_headers["authorization"] = f"Bearer {self.api_key}"
-        response = await self._client.request(
-            method,
-            f"{self.base_url}/{path.lstrip('/')}",
-            json=json,
-            headers=merged_headers,
-        )
-        return _json_or_raise(response)
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        attempt = 0
+        while True:
+            response = await self._client.request(method, url, **kwargs)
+            if attempt >= self.max_retries or not _retryable(response.status_code):
+                return _json_or_raise(response)
+            await asyncio.sleep(
+                _retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers))
+            )
+            attempt += 1
 
     def _build_chat_request(
         self,
@@ -393,14 +703,25 @@ class AsyncTrustedRouter:
         messages: list[Mapping[str, Any]],
         api_key: str | None,
         params: Mapping[str, Any],
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
-        body = {"model": model, "messages": messages, "stream": True, **params}
+        # Pull our reserved kwargs out of `params` so they aren't sent
+        # into the JSON body. (Defensive: callers spreading a dict
+        # might inadvertently include these.)
+        params_dict = dict(params)
+        for reserved in ("extra_headers", "idempotency_key", "timeout", "api_key"):
+            params_dict.pop(reserved, None)
+        body = {"model": model, "messages": messages, "stream": True, **params_dict}
         return _build_stream_request(
             "POST",
             f"{self.base_url}/chat/completions",
             body=body,
             api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=None,
+            extra_headers=extra_headers,
+            idempotency_key=idempotency_key,
+            timeout=timeout,
         )
 
     async def chat_completions_stream(
@@ -409,17 +730,20 @@ class AsyncTrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> AsyncIterator[str]:
         """Yield assistant-message text deltas as they arrive. Pass
         `api_key` to override the instance key for this single call."""
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         async with self._client.stream(**req) as response:
             if response.is_error:
-                detail = (await response.aread()).decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                await _araise_for_stream_response(response)
             async for chunk in _aiter_sse_chunks(response):
                 txt = _delta_text(chunk)
                 if txt:
@@ -431,6 +755,9 @@ class AsyncTrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yield parsed OpenAI chat.completion.chunk dicts as they arrive.
@@ -438,12 +765,12 @@ class AsyncTrustedRouter:
         (e.g. `finish_reason`, `model`, `id`) — for instance when
         translating to a different SSE shape."""
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         async with self._client.stream(**req) as response:
             if response.is_error:
-                detail = (await response.aread()).decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                await _araise_for_stream_response(response)
             async for chunk in _aiter_sse_chunks(response):
                 yield chunk
 
@@ -453,18 +780,21 @@ class AsyncTrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> AsyncIterator[bytes]:
         """Pass-through SSE bytes. For relays that need to forward the
         raw `data: {...}\\n\\n` framing without decoding (e.g. an HTTP
         proxy in front of the gateway)."""
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         async with self._client.stream(**req) as response:
             if response.is_error:
-                detail = (await response.aread()).decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                await _araise_for_stream_response(response)
             async for chunk in response.aiter_bytes():
                 yield chunk
 
@@ -474,16 +804,19 @@ class AsyncTrustedRouter:
         model: str = AUTO_MODEL,
         messages: list[Mapping[str, Any]],
         api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> dict[str, Any]:
         req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params
+            model=model, messages=messages, api_key=api_key, params=params,
+            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
         )
         chunks: list[dict[str, Any]] = []
         async with self._client.stream(**req) as response:
             if response.is_error:
-                detail = (await response.aread()).decode("utf-8", errors="replace")[:240]
-                raise TrustedRouterError(response.status_code, detail)
+                await _araise_for_stream_response(response)
             async for chunk in _aiter_sse_chunks(response):
                 chunks.append(chunk)
         return _collect_completion(chunks)
@@ -500,6 +833,40 @@ class AsyncTrustedRouter:
     async def credits(self) -> dict[str, Any]:
         return await self.request("GET", "/credits")
 
+    async def embeddings(
+        self,
+        *,
+        model: str,
+        input: str | list[str] | list[int] | list[list[int]],
+        encoding_format: str | None = None,
+        dimensions: int | None = None,
+        user: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"model": model, "input": input}
+        if encoding_format is not None:
+            body["encoding_format"] = encoding_format
+        if dimensions is not None:
+            body["dimensions"] = dimensions
+        if user is not None:
+            body["user"] = user
+        return await self.request("POST", "/embeddings", json=body)
+
+    async def messages(
+        self,
+        *,
+        model: str,
+        messages: list[Mapping[str, Any]],
+        max_tokens: int = 1024,
+        **params: Any,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            **params,
+        }
+        return await self.request("POST", "/messages", json=body)
+
     async def billing_checkout(
         self,
         *,
@@ -508,6 +875,7 @@ class AsyncTrustedRouter:
         workspace_id: str | None = None,
         success_url: str | None = None,
         cancel_url: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
@@ -518,7 +886,9 @@ class AsyncTrustedRouter:
             body["success_url"] = success_url
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
-        return await self.request("POST", "/billing/checkout", json=body)
+        return await self.request(
+            "POST", "/billing/checkout", json=body, idempotency_key=idempotency_key
+        )
 
     async def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
         return await self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
@@ -528,6 +898,11 @@ class AsyncTrustedRouter:
 
     async def logout(self) -> dict[str, Any]:
         return await self.request("POST", "/auth/logout")
+
+    async def activity(self, **params: Any) -> dict[str, Any]:
+        query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
+        suffix = f"?{query}" if query else ""
+        return await self.request("GET", f"/activity{suffix}")
 
     async def attestation(self) -> bytes:
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
@@ -547,15 +922,23 @@ def fetch_trust_release(
 
 
 def _json_or_raise(response: httpx.Response) -> dict[str, Any]:
+    retry_after = _retry_after_seconds(response.headers)
     try:
         payload = response.json()
     except ValueError as exc:
         if response.is_error:
-            raise TrustedRouterError(response.status_code, response.text[:240]) from exc
+            raise _classify_error(
+                response.status_code,
+                response.text[:240],
+                payload=None,
+                retry_after=retry_after,
+            ) from exc
         raise
     if response.is_error:
         message = _error_message(payload)
-        raise TrustedRouterError(response.status_code, message, payload=payload)
+        raise _classify_error(
+            response.status_code, message, payload=payload, retry_after=retry_after
+        )
     if not isinstance(payload, dict):
         raise TrustedRouterError(response.status_code, "Expected JSON object", payload=payload)
     return payload

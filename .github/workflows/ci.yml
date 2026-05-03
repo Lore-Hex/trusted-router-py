@@ -14,6 +14,13 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
-      - run: uv sync
+      - run: uv sync --group dev
       - run: uv run ruff check .
-      - run: uv run pytest -q
+      - run: uv run pytest
+      - name: Upload coverage XML for downstream tools
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore

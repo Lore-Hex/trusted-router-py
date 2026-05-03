@@ -1,52 +1,261 @@
 # TrustedRouter Python SDK
 
-Small Python client for TrustedRouter.
+OpenAI-compatible Python client for [TrustedRouter](https://trustedrouter.com) —
+the hosted, attested LLM router that lets you point one OpenAI-shaped client
+at every provider (Anthropic, OpenAI, Google Vertex, Gemini, DeepSeek,
+Mistral, Cerebras) and *prove* the prompt path doesn't log.
 
-- API base: `https://api.quillrouter.com/v1`
-- Trust page: `https://trust.trustedrouter.com`
-- Control plane source: `https://github.com/Lore-Hex/quill-router`
+- Gateway: `https://api.quillrouter.com/v1`
+- Trust release: `https://trust.trustedrouter.com`
+- Source: `https://github.com/Lore-Hex/trusted-router-py`
 - License: Apache-2.0
 
-## Install
-
 ```bash
-pip install trusted-router-py
+pip install trusted-router-py                  # base client
+pip install trusted-router-py[attestation]     # + GCP attestation verification
 ```
 
-## Usage
+## Quick start
 
 ```python
-from trustedrouter import AUTO_MODEL, TrustedRouter
+from trustedrouter import TrustedRouter, AUTO_MODEL
 
-client = TrustedRouter(api_key="sk-tr-v1-...")
+with TrustedRouter(api_key="sk-tr-v1-...") as client:
+    resp = client.chat_completions(
+        model=AUTO_MODEL,                     # "trustedrouter/auto" — multi-provider failover
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    print(resp["choices"][0]["message"]["content"])
+```
 
-response = client.chat_completions(
+`chat_completions(...)` defaults to `AUTO_MODEL` when `model=` is omitted, so
+the simplest possible call is `client.chat_completions(messages=[...])`.
+
+## Streaming
+
+```python
+for token in client.chat_completions_stream(
     model=AUTO_MODEL,
-    messages=[{"role": "user", "content": "hello"}],
+    messages=[{"role": "user", "content": "Write a haiku"}],
+):
+    print(token, end="", flush=True)
+```
+
+`chat_completions_chunk_stream(...)` yields the raw OpenAI
+`chat.completion.chunk` dicts (with `finish_reason`, `model`, `id`) when you
+need more than just the text delta.
+
+## Async
+
+Every method on `TrustedRouter` is mirrored on `AsyncTrustedRouter` as a
+coroutine; streaming methods return `AsyncIterator`s. Use it from FastAPI,
+asyncio, or any event-loop-driven app:
+
+```python
+import asyncio
+from trustedrouter import AsyncTrustedRouter
+
+async def main():
+    async with AsyncTrustedRouter(api_key="sk-tr-v1-...") as client:
+        async for token in client.chat_completions_stream(
+            model="trustedrouter/auto",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            print(token, end="", flush=True)
+
+asyncio.run(main())
+```
+
+## Region pinning
+
+The gateway is deployed in `us-central1` (the apex) and `europe-west4`. Pin
+to a specific region with one kwarg — no need to construct the URL yourself:
+
+```python
+client = TrustedRouter(api_key="sk-tr-v1-...", region="europe-west4")
+```
+
+The full list lives in `trustedrouter.REGION_HOSTS`. Pass `region=` for known
+regions, or `base_url=` for a custom endpoint (e.g. a self-hosted gateway).
+Passing both is a configuration error.
+
+## Typed errors
+
+Every HTTP failure raises a typed subclass of `TrustedRouterError` so callers
+can discriminate without inspecting status codes:
+
+```python
+from trustedrouter import (
+    TrustedRouter, AuthenticationError, RateLimitError,
+    BadRequestError, NotFoundError, InternalError,
 )
 
-print(response["choices"][0]["message"]["content"])
+try:
+    client.chat_completions(messages=[...])
+except RateLimitError as e:
+    time.sleep(e.retry_after or 5)        # honors Retry-After header
+except AuthenticationError:
+    refresh_key()
+except BadRequestError as e:
+    log.warning("bad request: %s", e)
+except InternalError:
+    pass                                   # auto-retried; still failing
 ```
 
-`trustedrouter/auto` is the default high-level chat model in the SDK. It maps to
-TrustedRouter's provider rollover route.
+All subclasses inherit from `TrustedRouterError`, so existing
+`except TrustedRouterError` blocks keep working.
+
+## Automatic retries
+
+By default the client retries `429` and `5xx` responses up to **2 times**
+with exponential backoff + jitter (capped at 30s, honors `Retry-After`).
+Disable with `max_retries=0`:
 
 ```python
-regions = client.regions()
-checkout = client.stablecoin_checkout(amount=25)
+client = TrustedRouter(api_key="...", max_retries=0)   # raise immediately on transient
 ```
 
-The SDK intentionally uses OpenAI-compatible request and response shapes. Use
-`client.request(...)` for routes that are not wrapped yet.
+## Per-call extras
 
-## Trust Metadata
+Every chat method (and `request()` for ad-hoc paths) accepts:
+
+| kwarg | use |
+|---|---|
+| `api_key=` | override the instance bearer for this call only (threadsafe — used by validate_bearer) |
+| `extra_headers=` | dict of headers to merge in (trace IDs, custom routing) |
+| `idempotency_key=` | adds `Idempotency-Key:` so the gateway dedupes retries — **strongly recommended for billing** |
+| `timeout=` | override the client-level timeout for this call |
 
 ```python
-from trustedrouter import fetch_trust_release
-
-release = fetch_trust_release()
-print(release["image_digest"])
+client.billing_checkout(
+    amount=25,
+    payment_method="stablecoin",
+    idempotency_key=f"checkout-{user_id}-{order_id}",   # never double-charge
+)
 ```
 
-Full attestation verification helpers will live here as the hosted attestation
-contract stabilizes.
+## Attestation verification (the differentiator)
+
+Every TrustedRouter response is generated inside a Google Confidential Space
+workload. The gateway's `/attestation` endpoint mints a Google-signed JWT
+that commits to the workload image digest, image reference, your nonce, and
+the TLS leaf cert SHA-256. Verifying it proves the prompt path you're about
+to use is the exact build the trust page advertises:
+
+```python
+import secrets, ssl, socket
+from trustedrouter import TrustedRouter
+from trustedrouter.attestation import (
+    verify_gateway_attestation, policy_from_trust_release,
+)
+
+# Pull the published image digest/reference from the trust page
+policy = policy_from_trust_release()                 # or pin one explicitly
+
+with TrustedRouter(api_key="sk-tr-v1-...") as client:
+    nonce = secrets.token_hex(16)
+    jwt = client.attestation()                       # raw JWT bytes
+
+    # Bind the JWT to the live TLS connection's cert
+    with ssl.create_default_context().wrap_socket(
+        socket.create_connection(("api.quillrouter.com", 443)),
+        server_hostname="api.quillrouter.com",
+    ) as s:
+        cert_der = s.getpeercert(binary_form=True)
+
+    attestation = verify_gateway_attestation(
+        jwt, policy=policy, nonce_hex=nonce, tls_cert_der=cert_der
+    )
+    print("verified gateway:", attestation.image_digest)
+```
+
+`verify_gateway_attestation()` raises `AttestationVerificationError` on any
+of: bad signature, expired JWT, wrong issuer, audience mismatch,
+image_digest mismatch, image_reference mismatch, missing nonce echo, or
+TLS cert mismatch. Never returns falsey for a failed verification.
+
+This codepath needs `cryptography`; install with
+`pip install trusted-router-py[attestation]`.
+
+## Bring your own httpx client
+
+Pass `client=` if you need a custom transport (cert pinning, retries you
+manage, observability hooks). The SDK won't close it on `aclose()`:
+
+```python
+import httpx
+from trustedrouter import AsyncTrustedRouter
+
+my_client = httpx.AsyncClient(
+    timeout=30.0,
+    event_hooks={"response": [my_cert_pin_hook]},
+)
+sdk = AsyncTrustedRouter(api_key="...", client=my_client)
+# ...use sdk...
+await sdk.aclose()        # no-op for caller-owned clients
+await my_client.aclose()  # caller still owns lifecycle
+```
+
+This is exactly how the [Quill device](https://github.com/Lore-Hex/quill)
+wraps the SDK so it can pin Quill Cloud's self-signed leaf cert via an
+httpx event hook, while delegating chat streaming to the SDK.
+
+## CLI
+
+`pip install` exposes a `trustedrouter` console script for sniff tests:
+
+```bash
+export TRUSTEDROUTER_API_KEY=sk-tr-v1-...
+
+trustedrouter chat "hello"                 # one-shot completion
+trustedrouter chat --stream "long answer"  # token-by-token
+trustedrouter regions                      # list deployed regions
+trustedrouter providers                    # list provider catalog
+trustedrouter models                       # list model catalog
+trustedrouter trust                        # show trust release
+trustedrouter attest                       # raw JWT bytes (pipe to `jq`-able tools)
+trustedrouter --region europe-west4 chat "hi"
+```
+
+## Other endpoints
+
+```python
+client.models()             # OpenAI-shape catalog
+client.providers()          # provider list
+client.regions()            # deployed regions
+client.credits()            # current prepaid balance
+client.activity(since="2026-01-01", limit=50)
+client.embeddings(model="text-embed", input="hello")
+client.messages(            # Anthropic-shape, preserves system + content blocks
+    model="anthropic/claude-3-5-sonnet",
+    messages=[{"role": "user", "content": "hi"}],
+    max_tokens=512,
+)
+client.billing_checkout(amount=25, payment_method="stablecoin", idempotency_key=...)
+```
+
+For routes the SDK doesn't wrap, drop down to `client.request(...)`:
+
+```python
+client.request("GET", "/some/new/route", headers={"x-trace": "abc"})
+```
+
+## Roadmap
+
+- **v0.3 (planned):** typed pydantic response models. Today every method
+  returns `dict[str, Any]`; pydantic models will give you IDE autocomplete +
+  runtime validation. Currently held back to avoid adding a heavy dependency
+  to the base install.
+- **v0.x:** AWS Nitro Enclaves attestation path (currently only GCP).
+
+## Contributing
+
+```bash
+uv sync --group dev
+uv run ruff check .
+uv run pytest                              # ~110 tests, ≥85% coverage gate
+```
+
+CI runs lint + tests on every push to main and PR. Coverage gate is
+enforced — PRs that drop coverage below 85% fail. Add tests with new
+public surface.
