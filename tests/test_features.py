@@ -13,6 +13,7 @@ from trustedrouter import (
     AsyncTrustedRouter,
     AuthenticationError,
     BadRequestError,
+    EndpointNotSupportedError,
     InternalError,
     NotFoundError,
     PermissionDeniedError,
@@ -75,6 +76,7 @@ def test_async_constructor_region_collision() -> None:
         (404, NotFoundError),
         (422, BadRequestError),  # 4xx not otherwise classified
         (429, RateLimitError),
+        (501, EndpointNotSupportedError),
         (500, InternalError),
         (503, InternalError),
     ],
@@ -126,6 +128,26 @@ def test_rate_limit_error_with_no_retry_after_header_is_none() -> None:
     with pytest.raises(RateLimitError) as exc_info:
         sdk.models()
     assert exc_info.value.retry_after is None
+    sdk.close()
+
+
+def test_workspace_id_header_can_be_set_on_client_or_per_call() -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-trustedrouter-workspace"))
+        return httpx.Response(200, json={"data": {}})
+
+    sdk = TrustedRouter(
+        api_key="k",
+        workspace_id="ws_default",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    sdk.credits()
+    sdk.credits(workspace_id="ws_override")
+
+    assert seen == ["ws_default", "ws_override"]
     sdk.close()
 
 
@@ -391,6 +413,29 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         "dimensions": 512,
         "user": "u_42",
     }
+
+
+def test_embeddings_not_supported_maps_to_typed_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            501,
+            json={
+                "error": {
+                    "message": "Endpoint is not supported",
+                    "type": "endpoint_not_supported",
+                }
+            },
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+
+    with pytest.raises(EndpointNotSupportedError):
+        sdk.embeddings(model="openai/gpt-4o-mini", input="hello")
+    sdk.close()
 
 
 def test_sync_messages_anthropic_shape() -> None:

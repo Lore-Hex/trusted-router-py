@@ -101,6 +101,10 @@ class NotFoundError(TrustedRouterError):
     """404 — the model, region, or resource doesn't exist."""
 
 
+class EndpointNotSupportedError(TrustedRouterError):
+    """501 — this OpenRouter-compatible endpoint is intentionally stubbed."""
+
+
 class RateLimitError(TrustedRouterError):
     """429 — slow down. `retry_after` is the value of the Retry-After
     header in seconds, or None if the gateway didn't send one."""
@@ -133,6 +137,8 @@ def _classify_error(
         return NotFoundError(status_code, message, payload=payload)
     if status_code == 429:
         return RateLimitError(status_code, message, payload=payload, retry_after=retry_after)
+    if status_code == 501:
+        return EndpointNotSupportedError(status_code, message, payload=payload)
     if 400 <= status_code < 500:
         return BadRequestError(status_code, message, payload=payload)
     if status_code >= 500:
@@ -329,6 +335,7 @@ class TrustedRouter:
         region: str | None = None,
         timeout: float = 120.0,
         headers: Mapping[str, str] | None = None,
+        workspace_id: str | None = None,
         client: httpx.Client | None = None,
         max_retries: int = 2,
     ) -> None:
@@ -352,6 +359,7 @@ class TrustedRouter:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.region = region
+        self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
@@ -382,6 +390,7 @@ class TrustedRouter:
         *,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        workspace_id: str | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
@@ -390,6 +399,9 @@ class TrustedRouter:
             merged_headers.update(headers)
         if idempotency_key:
             merged_headers["idempotency-key"] = idempotency_key
+        selected_workspace_id = workspace_id if workspace_id is not None else self.workspace_id
+        if selected_workspace_id:
+            merged_headers["x-trustedrouter-workspace"] = selected_workspace_id
         if self.api_key:
             merged_headers["authorization"] = f"Bearer {self.api_key}"
         url = f"{self.base_url}/{path.lstrip('/')}"
@@ -522,8 +534,10 @@ class TrustedRouter:
     def regions(self) -> RegionList:
         return RegionList.model_validate(self.request("GET", "/regions"))
 
-    def credits(self) -> CreditsBalance:
-        return CreditsBalance.model_validate(self.request("GET", "/credits"))
+    def credits(self, *, workspace_id: str | None = None) -> CreditsBalance:
+        return CreditsBalance.model_validate(
+            self.request("GET", "/credits", workspace_id=workspace_id)
+        )
 
     def embeddings(
         self,
@@ -534,9 +548,13 @@ class TrustedRouter:
         dimensions: int | None = None,
         user: str | None = None,
     ) -> EmbeddingResponse:
-        """OpenAI-compatible embeddings. Routes through whichever
-        embedding-capable provider the catalog has registered for
-        `model` — see `client.models()` for the live list."""
+        """OpenAI-compatible embeddings wrapper.
+
+        The hosted TrustedRouter API currently returns a stable
+        EndpointNotSupportedError for this route instead of fake vectors.
+        The wrapper remains so self-hosted deployments and future hosted
+        releases have a typed call site.
+        """
         body: dict[str, Any] = {"model": model, "input": input}
         if encoding_format is not None:
             body["encoding_format"] = encoding_format
@@ -588,9 +606,15 @@ class TrustedRouter:
             body["success_url"] = success_url
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
-        return CheckoutSession.model_validate(self.request(
-            "POST", "/billing/checkout", json=body, idempotency_key=idempotency_key
-        ))
+        return CheckoutSession.model_validate(
+            self.request(
+                "POST",
+                "/billing/checkout",
+                json=body,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key,
+            )
+        )
 
     def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> CheckoutSession:
         return self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
@@ -643,6 +667,7 @@ class AsyncTrustedRouter:
         timeout: float = 120.0,
         headers: Mapping[str, str] | None = None,
         verify: bool | str = True,
+        workspace_id: str | None = None,
         client: httpx.AsyncClient | None = None,
         max_retries: int = 2,
     ) -> None:
@@ -655,6 +680,7 @@ class AsyncTrustedRouter:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.region = region
+        self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
@@ -688,6 +714,7 @@ class AsyncTrustedRouter:
         *,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        workspace_id: str | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
     ) -> dict[str, Any]:
@@ -696,6 +723,9 @@ class AsyncTrustedRouter:
             merged_headers.update(headers)
         if idempotency_key:
             merged_headers["idempotency-key"] = idempotency_key
+        selected_workspace_id = workspace_id if workspace_id is not None else self.workspace_id
+        if selected_workspace_id:
+            merged_headers["x-trustedrouter-workspace"] = selected_workspace_id
         if self.api_key:
             merged_headers["authorization"] = f"Bearer {self.api_key}"
         url = f"{self.base_url}/{path.lstrip('/')}"
@@ -844,8 +874,10 @@ class AsyncTrustedRouter:
     async def regions(self) -> RegionList:
         return RegionList.model_validate(await self.request("GET", "/regions"))
 
-    async def credits(self) -> CreditsBalance:
-        return CreditsBalance.model_validate(await self.request("GET", "/credits"))
+    async def credits(self, *, workspace_id: str | None = None) -> CreditsBalance:
+        return CreditsBalance.model_validate(
+            await self.request("GET", "/credits", workspace_id=workspace_id)
+        )
 
     async def embeddings(
         self,
@@ -904,9 +936,15 @@ class AsyncTrustedRouter:
             body["success_url"] = success_url
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
-        return CheckoutSession.model_validate(await self.request(
-            "POST", "/billing/checkout", json=body, idempotency_key=idempotency_key
-        ))
+        return CheckoutSession.model_validate(
+            await self.request(
+                "POST",
+                "/billing/checkout",
+                json=body,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key,
+            )
+        )
 
     async def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> CheckoutSession:
         return await self.billing_checkout(amount=amount, payment_method="stablecoin", **params)

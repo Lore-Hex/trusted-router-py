@@ -94,7 +94,7 @@ can discriminate without inspecting status codes:
 ```python
 from trustedrouter import (
     TrustedRouter, AuthenticationError, RateLimitError,
-    BadRequestError, NotFoundError, InternalError,
+    BadRequestError, EndpointNotSupportedError, NotFoundError, InternalError,
 )
 
 try:
@@ -105,6 +105,8 @@ except AuthenticationError:
     refresh_key()
 except BadRequestError as e:
     log.warning("bad request: %s", e)
+except EndpointNotSupportedError:
+    disable_optional_feature()
 except InternalError:
     pass                                   # auto-retried; still failing
 ```
@@ -130,6 +132,7 @@ Every chat method (and `request()` for ad-hoc paths) accepts:
 |---|---|
 | `api_key=` | override the instance bearer for this call only (threadsafe — used by validate_bearer) |
 | `extra_headers=` | dict of headers to merge in (trace IDs, custom routing) |
+| `workspace_id=` | sets `X-TrustedRouter-Workspace` for workspace-scoped management calls |
 | `idempotency_key=` | adds `Idempotency-Key:` so the gateway dedupes retries — **strongly recommended for billing** |
 | `timeout=` | override the client-level timeout for this call |
 
@@ -230,9 +233,8 @@ trustedrouter --region europe-west4 chat "hi"
 client.models()             # OpenAI-shape catalog
 client.providers()          # provider list
 client.regions()            # deployed regions
-client.credits()            # current prepaid balance
+client.credits(workspace_id="ws_...")  # current prepaid balance for a workspace
 client.activity(since="2026-01-01", limit=50)
-client.embeddings(model="text-embed", input="hello")
 client.messages(            # Anthropic-shape, preserves system + content blocks
     model="anthropic/claude-3-5-sonnet",
     messages=[{"role": "user", "content": "hi"}],
@@ -240,6 +242,11 @@ client.messages(            # Anthropic-shape, preserves system + content blocks
 )
 client.billing_checkout(amount=25, payment_method="stablecoin", idempotency_key=...)
 ```
+
+`client.embeddings(...)` is present for API compatibility, but the hosted
+TrustedRouter route currently raises `EndpointNotSupportedError` instead of
+returning fake vectors. Use `client.models()` / `/embeddings/models` to inspect
+the future embedding catalog.
 
 For routes the SDK doesn't wrap, drop down to `client.request(...)`:
 
