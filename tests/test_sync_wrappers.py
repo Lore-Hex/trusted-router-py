@@ -41,8 +41,8 @@ def test_sync_chat_completions_collected_aggregates_stream() -> None:
 
     sdk = _client(handler)
     resp = sdk.chat_completions(model="m", messages=[{"role": "user", "content": "hi"}])
-    assert resp["choices"][0]["message"]["content"] == "PING"
-    assert resp["choices"][0]["finish_reason"] == "stop"
+    assert resp.choices[0].message.content == "PING"
+    assert resp.choices[0].finish_reason == "stop"
     sdk.close()
 
 
@@ -119,7 +119,7 @@ def test_sync_trust_release_returns_parsed_json() -> None:
 
     sdk = _client(handler)
     out = sdk.trust_release(url="https://test-trust.example/release.json")
-    assert out["image_digest"] == "sha256:abc"
+    assert out.image_digest == "sha256:abc"
     sdk.close()
 
 
@@ -150,7 +150,7 @@ def test_module_level_fetch_trust_release_uses_its_own_client() -> None:
     finally:
         mod.httpx.Client = real_client  # type: ignore[assignment]
 
-    assert out == {"image_digest": "sha256:zzz"}
+    assert out.image_digest == "sha256:zzz"
     assert captured.get("called") is True
 
 

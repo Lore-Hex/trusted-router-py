@@ -11,6 +11,22 @@ from typing import Any
 
 import httpx
 
+from trustedrouter.models import (
+    ActivityList,
+    AuthSession,
+    ChatCompletion,
+    ChatCompletionChunk,
+    CheckoutSession,
+    CreditsBalance,
+    EmbeddingResponse,
+    LogoutResponse,
+    MessagesResponse,
+    ModelList,
+    ProviderList,
+    RegionList,
+    TrustRelease,
+)
+
 DEFAULT_API_BASE_URL = "https://api.quillrouter.com/v1"
 DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
 AUTO_MODEL = "trustedrouter/auto"
@@ -458,11 +474,11 @@ class TrustedRouter:
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
-    ) -> Iterator[dict[str, Any]]:
-        """Yield parsed OpenAI chat.completion.chunk dicts as they arrive.
-        Use this when you need access to fields beyond the text delta
-        (e.g. `finish_reason`, `model`, `id`) — for instance when
-        translating to a different SSE shape."""
+    ) -> Iterator[ChatCompletionChunk]:
+        """Yield parsed OpenAI chat.completion.chunk frames as typed
+        ChatCompletionChunk models. Use this when you need access to
+        fields beyond the text delta (e.g. `finish_reason`, `model`,
+        `id`) — for instance when translating to a different SSE shape."""
         req = self._build_chat_request(
             model=model, messages=messages, api_key=api_key, params=params,
             extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
@@ -470,7 +486,8 @@ class TrustedRouter:
         with self._client.stream(**req) as response:
             if response.is_error:
                 _raise_for_stream_response(response)
-            yield from _iter_sse_chunks(response)
+            for chunk in _iter_sse_chunks(response):
+                yield ChatCompletionChunk.model_validate(chunk)
 
     def chat_completions(
         self,
@@ -482,10 +499,10 @@ class TrustedRouter:
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
-    ) -> dict[str, Any]:
-        """Collect the streamed response into a single OpenAI-shape
-        chat.completion dict. Use chat_completions_stream() if you want
-        to stream tokens to the user instead."""
+    ) -> ChatCompletion:
+        """Collect the streamed response into a single typed
+        ChatCompletion. Use chat_completions_stream() if you want to
+        stream tokens to the user instead."""
         req = self._build_chat_request(
             model=model, messages=messages, api_key=api_key, params=params,
             extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
@@ -494,19 +511,19 @@ class TrustedRouter:
             if response.is_error:
                 _raise_for_stream_response(response)
             chunks = list(_iter_sse_chunks(response))
-        return _collect_completion(chunks)
+        return ChatCompletion.model_validate(_collect_completion(chunks))
 
-    def models(self) -> dict[str, Any]:
-        return self.request("GET", "/models")
+    def models(self) -> ModelList:
+        return ModelList.model_validate(self.request("GET", "/models"))
 
-    def providers(self) -> dict[str, Any]:
-        return self.request("GET", "/providers")
+    def providers(self) -> ProviderList:
+        return ProviderList.model_validate(self.request("GET", "/providers"))
 
-    def regions(self) -> dict[str, Any]:
-        return self.request("GET", "/regions")
+    def regions(self) -> RegionList:
+        return RegionList.model_validate(self.request("GET", "/regions"))
 
-    def credits(self) -> dict[str, Any]:
-        return self.request("GET", "/credits")
+    def credits(self) -> CreditsBalance:
+        return CreditsBalance.model_validate(self.request("GET", "/credits"))
 
     def embeddings(
         self,
@@ -516,7 +533,7 @@ class TrustedRouter:
         encoding_format: str | None = None,
         dimensions: int | None = None,
         user: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> EmbeddingResponse:
         """OpenAI-compatible embeddings. Routes through whichever
         embedding-capable provider the catalog has registered for
         `model` — see `client.models()` for the live list."""
@@ -527,7 +544,7 @@ class TrustedRouter:
             body["dimensions"] = dimensions
         if user is not None:
             body["user"] = user
-        return self.request("POST", "/embeddings", json=body)
+        return EmbeddingResponse.model_validate(self.request("POST", "/embeddings", json=body))
 
     def messages(
         self,
@@ -536,7 +553,7 @@ class TrustedRouter:
         messages: list[Mapping[str, Any]],
         max_tokens: int = 1024,
         **params: Any,
-    ) -> dict[str, Any]:
+    ) -> MessagesResponse:
         """Anthropic-shape Messages endpoint. For providers that expose
         the native Anthropic API (rather than translating to/from
         OpenAI shape), this preserves system prompts, content blocks,
@@ -547,7 +564,7 @@ class TrustedRouter:
             "max_tokens": max_tokens,
             **params,
         }
-        return self.request("POST", "/messages", json=body)
+        return MessagesResponse.model_validate(self.request("POST", "/messages", json=body))
 
     def billing_checkout(
         self,
@@ -558,7 +575,7 @@ class TrustedRouter:
         success_url: str | None = None,
         cancel_url: str | None = None,
         idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> CheckoutSession:
         """Create a Stripe checkout session. Pass `idempotency_key=` to
         guarantee at-most-once charge semantics across network retries
         — strongly recommended for production."""
@@ -571,32 +588,31 @@ class TrustedRouter:
             body["success_url"] = success_url
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
-        return self.request(
+        return CheckoutSession.model_validate(self.request(
             "POST", "/billing/checkout", json=body, idempotency_key=idempotency_key
-        )
+        ))
 
-    def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
+    def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> CheckoutSession:
         return self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
 
-    def auth_session(self) -> dict[str, Any]:
-        return self.request("GET", "/auth/session")
+    def auth_session(self) -> AuthSession:
+        return AuthSession.model_validate(self.request("GET", "/auth/session"))
 
-    def logout(self) -> dict[str, Any]:
-        return self.request("POST", "/auth/logout")
+    def logout(self) -> LogoutResponse:
+        return LogoutResponse.model_validate(self.request("POST", "/auth/logout"))
 
-    def activity(self, **params: Any) -> dict[str, Any]:
+    def activity(self, **params: Any) -> ActivityList:
         """List recent generations for the authenticated key/workspace.
         Pass any subset of {since, until, limit, model, workspace_id};
         None values are dropped from the query string."""
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
-        return self.request("GET", f"/activity{suffix}")
+        return ActivityList.model_validate(self.request("GET", f"/activity{suffix}"))
 
     def attestation(self) -> bytes:
         """Fetch the gateway's live attestation document. Returns the raw
-        JWT bytes (Confidential Space mints an OIDC JWT). Caller can
-        verify via Google's JWKS, then check audience + image_digest +
-        cert-fingerprint nonce against the trust release."""
+        JWT bytes (Confidential Space mints an OIDC JWT). Pass to
+        `trustedrouter.attestation.verify_gateway_attestation` to verify."""
         # /attestation lives at the API root, not under /v1
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
         response = self._client.get(url)
@@ -604,9 +620,9 @@ class TrustedRouter:
             raise TrustedRouterError(response.status_code, response.text[:240])
         return response.content
 
-    def trust_release(self, url: str = DEFAULT_TRUST_RELEASE_URL) -> dict[str, Any]:
+    def trust_release(self, url: str = DEFAULT_TRUST_RELEASE_URL) -> TrustRelease:
         response = self._client.get(url)
-        return _json_or_raise(response)
+        return TrustRelease.model_validate(_json_or_raise(response))
 
 
 # ---- async client --------------------------------------------------------
@@ -759,11 +775,9 @@ class AsyncTrustedRouter:
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Yield parsed OpenAI chat.completion.chunk dicts as they arrive.
-        Use this when you need access to fields beyond the text delta
-        (e.g. `finish_reason`, `model`, `id`) — for instance when
-        translating to a different SSE shape."""
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Yield parsed OpenAI chat.completion.chunk frames as typed
+        ChatCompletionChunk models."""
         req = self._build_chat_request(
             model=model, messages=messages, api_key=api_key, params=params,
             extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
@@ -772,7 +786,7 @@ class AsyncTrustedRouter:
             if response.is_error:
                 await _araise_for_stream_response(response)
             async for chunk in _aiter_sse_chunks(response):
-                yield chunk
+                yield ChatCompletionChunk.model_validate(chunk)
 
     async def chat_completions_raw_stream(
         self,
@@ -808,7 +822,7 @@ class AsyncTrustedRouter:
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
-    ) -> dict[str, Any]:
+    ) -> ChatCompletion:
         req = self._build_chat_request(
             model=model, messages=messages, api_key=api_key, params=params,
             extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
@@ -819,19 +833,19 @@ class AsyncTrustedRouter:
                 await _araise_for_stream_response(response)
             async for chunk in _aiter_sse_chunks(response):
                 chunks.append(chunk)
-        return _collect_completion(chunks)
+        return ChatCompletion.model_validate(_collect_completion(chunks))
 
-    async def models(self) -> dict[str, Any]:
-        return await self.request("GET", "/models")
+    async def models(self) -> ModelList:
+        return ModelList.model_validate(await self.request("GET", "/models"))
 
-    async def providers(self) -> dict[str, Any]:
-        return await self.request("GET", "/providers")
+    async def providers(self) -> ProviderList:
+        return ProviderList.model_validate(await self.request("GET", "/providers"))
 
-    async def regions(self) -> dict[str, Any]:
-        return await self.request("GET", "/regions")
+    async def regions(self) -> RegionList:
+        return RegionList.model_validate(await self.request("GET", "/regions"))
 
-    async def credits(self) -> dict[str, Any]:
-        return await self.request("GET", "/credits")
+    async def credits(self) -> CreditsBalance:
+        return CreditsBalance.model_validate(await self.request("GET", "/credits"))
 
     async def embeddings(
         self,
@@ -841,7 +855,7 @@ class AsyncTrustedRouter:
         encoding_format: str | None = None,
         dimensions: int | None = None,
         user: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> EmbeddingResponse:
         body: dict[str, Any] = {"model": model, "input": input}
         if encoding_format is not None:
             body["encoding_format"] = encoding_format
@@ -849,7 +863,9 @@ class AsyncTrustedRouter:
             body["dimensions"] = dimensions
         if user is not None:
             body["user"] = user
-        return await self.request("POST", "/embeddings", json=body)
+        return EmbeddingResponse.model_validate(
+            await self.request("POST", "/embeddings", json=body)
+        )
 
     async def messages(
         self,
@@ -858,14 +874,16 @@ class AsyncTrustedRouter:
         messages: list[Mapping[str, Any]],
         max_tokens: int = 1024,
         **params: Any,
-    ) -> dict[str, Any]:
+    ) -> MessagesResponse:
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             **params,
         }
-        return await self.request("POST", "/messages", json=body)
+        return MessagesResponse.model_validate(
+            await self.request("POST", "/messages", json=body)
+        )
 
     async def billing_checkout(
         self,
@@ -876,7 +894,7 @@ class AsyncTrustedRouter:
         success_url: str | None = None,
         cancel_url: str | None = None,
         idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> CheckoutSession:
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
             body["payment_method"] = payment_method
@@ -886,23 +904,23 @@ class AsyncTrustedRouter:
             body["success_url"] = success_url
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
-        return await self.request(
+        return CheckoutSession.model_validate(await self.request(
             "POST", "/billing/checkout", json=body, idempotency_key=idempotency_key
-        )
+        ))
 
-    async def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> dict[str, Any]:
+    async def stablecoin_checkout(self, *, amount: int | str, **params: Any) -> CheckoutSession:
         return await self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
 
-    async def auth_session(self) -> dict[str, Any]:
-        return await self.request("GET", "/auth/session")
+    async def auth_session(self) -> AuthSession:
+        return AuthSession.model_validate(await self.request("GET", "/auth/session"))
 
-    async def logout(self) -> dict[str, Any]:
-        return await self.request("POST", "/auth/logout")
+    async def logout(self) -> LogoutResponse:
+        return LogoutResponse.model_validate(await self.request("POST", "/auth/logout"))
 
-    async def activity(self, **params: Any) -> dict[str, Any]:
+    async def activity(self, **params: Any) -> ActivityList:
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
-        return await self.request("GET", f"/activity{suffix}")
+        return ActivityList.model_validate(await self.request("GET", f"/activity{suffix}"))
 
     async def attestation(self) -> bytes:
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
@@ -916,9 +934,11 @@ def fetch_trust_release(
     url: str = DEFAULT_TRUST_RELEASE_URL,
     *,
     timeout: float = 30.0,
-) -> dict[str, Any]:
+) -> TrustRelease:
+    """Fetch and parse the public trust release. Returns a typed
+    `TrustRelease` model (use `.model_dump()` if you need a dict)."""
     with httpx.Client(timeout=timeout) as client:
-        return _json_or_raise(client.get(url))
+        return TrustRelease.model_validate(_json_or_raise(client.get(url)))
 
 
 def _json_or_raise(response: httpx.Response) -> dict[str, Any]:

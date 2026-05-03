@@ -25,11 +25,18 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
         model=AUTO_MODEL,                     # "trustedrouter/auto" — multi-provider failover
         messages=[{"role": "user", "content": "hello"}],
     )
-    print(resp["choices"][0]["message"]["content"])
+    print(resp.choices[0].message.content)    # typed: ChatCompletion model
 ```
 
 `chat_completions(...)` defaults to `AUTO_MODEL` when `model=` is omitted, so
 the simplest possible call is `client.chat_completions(messages=[...])`.
+
+**Every method returns a typed pydantic model** — IDE autocomplete + runtime
+validation. Need a dict? Call `.model_dump()`:
+
+```python
+resp.model_dump()["choices"][0]["message"]["content"]
+```
 
 ## Streaming
 
@@ -242,10 +249,10 @@ client.request("GET", "/some/new/route", headers={"x-trace": "abc"})
 
 ## Roadmap
 
-- **v0.3 (planned):** typed pydantic response models. Today every method
-  returns `dict[str, Any]`; pydantic models will give you IDE autocomplete +
-  runtime validation. Currently held back to avoid adding a heavy dependency
-  to the base install.
+- **v0.3 (shipped):** typed pydantic response models — every method returns
+  a typed model. Migration: replace `resp["k"]` with `resp.k`, or call
+  `resp.model_dump()` to get the dict back. Models use `extra="allow"`
+  so the gateway can add fields without an SDK release.
 - **v0.x:** AWS Nitro Enclaves attestation path (currently only GCP).
 
 ## Contributing

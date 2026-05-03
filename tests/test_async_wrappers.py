@@ -48,10 +48,12 @@ def test_async_models_providers_regions_credits_send_get_with_bearer() -> None:
     sdk = _async_client(handler)
 
     async def run() -> None:
-        assert (await sdk.models())["data"][0]["id"] == "stub"
-        assert (await sdk.providers())["data"][0]["id"] == "stub"
-        assert (await sdk.regions())["data"][0]["id"] == "stub"
-        assert (await sdk.credits())["data"][0]["id"] == "stub"
+        # Typed accessors — ModelList/ProviderList/RegionList/CreditsBalance.
+        # CreditsBalance preserves the raw `data` dict so we read it directly.
+        assert (await sdk.models()).data[0].id == "stub"
+        assert (await sdk.providers()).data[0].id == "stub"
+        assert (await sdk.regions()).data[0].id == "stub"
+        assert (await sdk.credits()).data == [{"id": "stub"}]
         await sdk._client.aclose()
 
     _run(run())
@@ -212,9 +214,9 @@ def test_async_chat_completions_collected_uses_default_auto_model() -> None:
     result = _run(run())
     assert seen_bodies[0]["model"] == AUTO_MODEL
     assert seen_bodies[0]["stream"] is True
-    assert result["object"] == "chat.completion"
-    assert result["choices"][0]["message"]["content"] == "hello world"
-    assert result["choices"][0]["finish_reason"] == "stop"
+    assert result.object == "chat.completion"
+    assert result.choices[0].message.content == "hello world"
+    assert result.choices[0].finish_reason == "stop"
 
 
 def test_async_chat_completions_collected_raises_on_4xx() -> None:

@@ -178,7 +178,7 @@ def test_request_retries_on_429_then_succeeds() -> None:
         if state["calls"] < 3:
             return httpx.Response(429, headers={"Retry-After": "0"},
                                   json={"error": {"message": "x"}})
-        return httpx.Response(200, json={"data": ["ok"]})
+        return httpx.Response(200, json={"data": [{"id": "ok", "name": "ok"}]})
 
     sdk = TrustedRouter(
         api_key="k",
@@ -186,7 +186,7 @@ def test_request_retries_on_429_then_succeeds() -> None:
         max_retries=3,
     )
     out = sdk.models()
-    assert out == {"data": ["ok"]}
+    assert out.data[0].id == "ok"
     assert state["calls"] == 3
     sdk.close()
 
@@ -267,7 +267,7 @@ def test_async_request_retries_on_503() -> None:
             max_retries=3,
         )
         result = await sdk.models()
-        assert result == {"data": []}
+        assert result.data == []
         await sdk._client.aclose()
 
     asyncio.run(run())

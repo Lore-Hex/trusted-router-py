@@ -51,7 +51,12 @@ def _client(args: argparse.Namespace) -> TrustedRouter:
 
 
 def _print(value: object) -> None:
-    if isinstance(value, (dict, list)):
+    # Pydantic models expose model_dump(); fall back to json.dumps for
+    # plain dicts/lists; everything else stringifies.
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        print(json.dumps(dump(), indent=2, default=str))
+    elif isinstance(value, (dict, list)):
         print(json.dumps(value, indent=2))
     else:
         print(value)
@@ -78,7 +83,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=args.max_tokens,
         )
-        print(resp["choices"][0]["message"]["content"])
+        print(resp.choices[0].message.content or "")
         return 0
     except AuthenticationError as exc:
         print(f"error: {exc} (set TRUSTEDROUTER_API_KEY)", file=sys.stderr)

@@ -30,7 +30,7 @@ def test_request_sends_bearer_token() -> None:
     client = TrustedRouter(api_key="sk-tr-test")
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
 
-    assert client.models() == {"data": []}
+    assert client.models().data == []
     client.close()
 
 
@@ -52,8 +52,8 @@ def test_auto_model_constant_and_region_provider_helpers() -> None:
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
 
     assert AUTO_MODEL == "trustedrouter/auto"
-    assert client.regions()["data"][1]["id"] == "europe-west4"
-    assert client.providers()["data"][0]["id"] == "vertex"
+    assert client.regions().data[1].id == "europe-west4"
+    assert client.providers().data[0].id == "vertex"
     assert seen == [
         ("GET", f"{DEFAULT_API_BASE_URL}/regions"),
         ("GET", f"{DEFAULT_API_BASE_URL}/providers"),
@@ -203,8 +203,8 @@ def test_chat_completions_chunk_stream_yields_parsed_chunks() -> None:
         )
     )
     assert len(out) == 2
-    assert out[0]["choices"][0]["delta"]["content"] == "hello"
-    assert out[1]["choices"][0]["finish_reason"] == "stop"
+    assert out[0].choices[0].delta.content == "hello"
+    assert out[1].choices[0].finish_reason == "stop"
     client.close()
 
 
@@ -257,7 +257,7 @@ def test_async_chat_completions_chunk_stream_yields_and_errors() -> None:
                 model="m", messages=[{"role": "user", "content": "x"}]
             )
         ]
-        assert [c["choices"][0]["delta"].get("content") for c in chunks] == ["a", "b"]
+        assert [c.choices[0].delta.content for c in chunks] == ["a", "b"]
         await ok._client.aclose()
 
         bad = AsyncTrustedRouter(
