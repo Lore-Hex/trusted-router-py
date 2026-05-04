@@ -219,6 +219,43 @@ def test_async_chat_completions_collected_uses_default_auto_model() -> None:
     assert result.choices[0].finish_reason == "stop"
 
 
+def test_async_chat_completions_workspace_override_is_header_not_body() -> None:
+    seen: list[tuple[str | None, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((
+            request.headers.get("x-trustedrouter-workspace"),
+            jsonlib.loads(request.content.decode()),
+        ))
+        body = (
+            b'data: {"id":"x","model":"a","choices":[{"delta":{"content":"ok"},'
+            b'"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    sdk = AsyncTrustedRouter(
+        api_key="k",
+        workspace_id="ws_default",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    async def run() -> None:
+        await sdk.chat_completions(
+            model="m",
+            messages=[{"role": "user", "content": "x"}],
+            workspace_id="ws_override",
+        )
+        await sdk.chat_completions(model="m", messages=[{"role": "user", "content": "x"}])
+        await sdk._client.aclose()
+
+    _run(run())
+    assert seen[0][0] == "ws_override"
+    assert "workspace_id" not in seen[0][1]
+    assert seen[1][0] == "ws_default"
+    assert "workspace_id" not in seen[1][1]
+
+
 def test_async_chat_completions_collected_raises_on_4xx() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"error": {"message": "bad model"}})

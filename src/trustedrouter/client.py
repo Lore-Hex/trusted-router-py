@@ -191,6 +191,7 @@ def _build_stream_request(
     api_key: str | None,
     extra_headers: Mapping[str, str] | None,
     idempotency_key: str | None = None,
+    workspace_id: str | None = None,
     timeout: float | httpx.Timeout | None = None,
 ) -> dict[str, Any]:
     headers: dict[str, str] = {
@@ -201,6 +202,8 @@ def _build_stream_request(
         headers.update(extra_headers)
     if idempotency_key:
         headers["idempotency-key"] = idempotency_key
+    if workspace_id:
+        headers["x-trustedrouter-workspace"] = workspace_id
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     payload: Mapping[str, Any] | None = body
@@ -433,6 +436,7 @@ class TrustedRouter:
         # into the JSON body. (Defensive: callers spreading a dict
         # might inadvertently include these.)
         params_dict = dict(params)
+        workspace_id = params_dict.pop("workspace_id", None)
         for reserved in ("extra_headers", "idempotency_key", "timeout", "api_key"):
             params_dict.pop(reserved, None)
         body = {"model": model, "messages": messages, "stream": True, **params_dict}
@@ -443,6 +447,7 @@ class TrustedRouter:
             api_key=api_key if api_key is not None else self.api_key,
             extra_headers=extra_headers,
             idempotency_key=idempotency_key,
+            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
             timeout=timeout,
         )
 
@@ -757,6 +762,7 @@ class AsyncTrustedRouter:
         # into the JSON body. (Defensive: callers spreading a dict
         # might inadvertently include these.)
         params_dict = dict(params)
+        workspace_id = params_dict.pop("workspace_id", None)
         for reserved in ("extra_headers", "idempotency_key", "timeout", "api_key"):
             params_dict.pop(reserved, None)
         body = {"model": model, "messages": messages, "stream": True, **params_dict}
@@ -767,6 +773,7 @@ class AsyncTrustedRouter:
             api_key=api_key if api_key is not None else self.api_key,
             extra_headers=extra_headers,
             idempotency_key=idempotency_key,
+            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
             timeout=timeout,
         )
 

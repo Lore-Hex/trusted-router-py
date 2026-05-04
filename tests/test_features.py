@@ -384,6 +384,40 @@ def test_chat_completions_drops_reserved_kwargs_from_body() -> None:
     sdk.close()
 
 
+def test_chat_completions_workspace_override_is_header_not_body() -> None:
+    seen: list[tuple[str | None, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((
+            request.headers.get("x-trustedrouter-workspace"),
+            jsonlib.loads(request.content.decode()),
+        ))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}\n\n',
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        workspace_id="ws_default",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+    sdk.chat_completions(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        workspace_id="ws_override",
+    )
+    sdk.chat_completions(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert seen[0][0] == "ws_override"
+    assert "workspace_id" not in seen[0][1]
+    assert seen[1][0] == "ws_default"
+    assert "workspace_id" not in seen[1][1]
+    sdk.close()
+
+
 # ---- embeddings + messages wrappers ------------------------------------
 
 
