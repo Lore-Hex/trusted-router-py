@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from trustedrouter import (
+    AUTO_MODEL,
     AsyncTrustedRouter,
     AuthenticationError,
     BadRequestError,
@@ -495,6 +496,132 @@ def test_sync_messages_anthropic_shape() -> None:
     assert bodies[0]["messages"][0]["role"] == "user"
 
 
+def test_sync_responses_wrapper_sends_workspace_header_not_body() -> None:
+    seen: list[tuple[str | None, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((
+            request.headers.get("x-trustedrouter-workspace"),
+            jsonlib.loads(request.content.decode()),
+        ))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_1",
+                "object": "response",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "pong"}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        workspace_id="ws_default",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    result = sdk.responses(
+        input="ping",
+        workspace_id="ws_override",
+        instructions="reply tersely",
+        metadata={"source": "test"},
+    )
+    sdk.close()
+
+    assert result.id == "resp_1"
+    assert seen[0][0] == "ws_override"
+    assert seen[0][1]["model"] == AUTO_MODEL
+    assert seen[0][1]["input"] == "ping"
+    assert seen[0][1]["stream"] is False
+    assert "workspace_id" not in seen[0][1]
+
+
+def test_sync_responses_stream_yields_responses_sse_events() -> None:
+    seen_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_bodies.append(jsonlib.loads(request.content.decode()))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b"event: response.created\n"
+                b'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
+                b"event: response.output_text.delta\n"
+                b'data: {"type":"response.output_text.delta","delta":"pong"}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    sdk = TrustedRouter(api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    events = list(sdk.responses_stream(input="ping"))
+    sdk.close()
+
+    assert seen_bodies[0]["stream"] is True
+    assert events[0]["event"] == "response.created"
+    assert events[1]["delta"] == "pong"
+
+
+def test_sync_responses_input_tokens_wrapper() -> None:
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={"input_tokens": 7, "total_tokens": 7})
+
+    sdk = TrustedRouter(api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    result = sdk.responses_input_tokens(input="count me")
+    sdk.close()
+
+    assert seen_paths == ["/v1/responses/input_tokens"]
+    assert result.input_tokens == 7
+
+
+def test_sync_broadcast_destination_helpers_and_status() -> None:
+    seen: list[tuple[str, str, str | None, dict[str, object] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content.decode()) if request.content else None
+        seen.append((
+            request.method,
+            request.url.path,
+            request.headers.get("x-trustedrouter-workspace"),
+            body,
+        ))
+        if request.url.host == "status.example":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(200, json={"data": {"id": "bdst_1"}})
+
+    sdk = TrustedRouter(
+        api_key="k",
+        workspace_id="ws_default",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    sdk.broadcast_destinations()
+    sdk.create_broadcast_destination(
+        type="webhook",
+        name="OTLP",
+        endpoint="https://hook.example/otlp",
+        headers={"Authorization": "Bearer x"},
+        workspace_id="ws_override",
+    )
+    sdk.test_broadcast_destination("bdst_1")
+    assert sdk.status("https://status.example/status.json")["status"] == "ok"
+    sdk.close()
+
+    assert seen[0] == ("GET", "/v1/broadcast/destinations", "ws_default", None)
+    assert seen[1][0:3] == ("POST", "/v1/broadcast/destinations", "ws_override")
+    assert seen[1][3] is not None
+    assert seen[1][3]["headers"] == {"Authorization": "Bearer x"}
+    assert seen[2][0:3] == ("POST", "/v1/broadcast/destinations/bdst_1/test", "ws_default")
+    assert seen[3][1] == "/status.json"
+
+
 def test_async_embeddings_and_messages() -> None:
     seen_paths: list[str] = []
 
@@ -514,6 +641,72 @@ def test_async_embeddings_and_messages() -> None:
 
     asyncio.run(run())
     assert seen_paths == ["/v1/embeddings", "/v1/messages"]
+
+
+def test_async_responses_wrapper_and_stream() -> None:
+    seen: list[tuple[str, str | None, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content.decode())
+        seen.append((request.url.path, request.headers.get("x-trustedrouter-workspace"), body))
+        if body.get("stream") is True:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b"event: response.completed\n"
+                b'data: {"type":"response.completed","response":{"id":"resp_2"}}\n\n'
+                b"data: [DONE]\n\n",
+            )
+        return httpx.Response(
+            200,
+            json={"id": "resp_1", "object": "response", "status": "completed"},
+        )
+
+    async def run() -> list[dict[str, object]]:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            workspace_id="ws_default",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        await sdk.responses(input="ping", workspace_id="ws_override")
+        events = [event async for event in sdk.responses_stream(input="ping")]
+        await sdk._client.aclose()
+        return events
+
+    events = asyncio.run(run())
+    assert seen[0][0] == "/v1/responses"
+    assert seen[0][1] == "ws_override"
+    assert "workspace_id" not in seen[0][2]
+    assert seen[1][1] == "ws_default"
+    assert events[0]["event"] == "response.completed"
+
+
+def test_async_broadcast_destination_helpers() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((
+            request.method,
+            request.url.path,
+            request.headers.get("x-trustedrouter-workspace"),
+        ))
+        return httpx.Response(200, json={"data": {"id": "bdst_1"}})
+
+    async def run() -> None:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            workspace_id="ws_default",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        await sdk.get_broadcast_destination("bdst_1", workspace_id="ws_override")
+        await sdk.delete_broadcast_destination("bdst_1")
+        await sdk._client.aclose()
+
+    asyncio.run(run())
+    assert seen == [
+        ("GET", "/v1/broadcast/destinations/bdst_1", "ws_override"),
+        ("DELETE", "/v1/broadcast/destinations/bdst_1", "ws_default"),
+    ]
 
 
 def test_async_activity_drops_none_params() -> None:

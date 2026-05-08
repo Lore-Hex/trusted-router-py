@@ -235,6 +235,51 @@ class MessagesResponse(_Base):
     usage: MessagesUsage | None = None
 
 
+# ---- responses ----------------------------------------------------------
+
+
+class ResponseUsage(_Base):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ResponseContentPart(_Base):
+    type: str
+    text: str | None = None
+    annotations: list[dict[str, Any]] | None = None
+
+
+class ResponseOutputItem(_Base):
+    id: str | None = None
+    type: str
+    role: str | None = None
+    content: list[ResponseContentPart] = Field(default_factory=list)
+    status: str | None = None
+
+
+class ResponseObject(_Base):
+    """OpenAI Responses API object returned by `client.responses(...)`.
+
+    The SDK keeps this forward-compatible because the full Responses
+    surface adds item types over time (reasoning, tool calls, refusals,
+    annotations). Unknown fields are preserved on model_dump().
+    """
+
+    id: str = ""
+    object: Literal["response"] = "response"
+    created_at: int = 0
+    status: str = ""
+    model: str | None = None
+    output: list[ResponseOutputItem] = Field(default_factory=list)
+    usage: ResponseUsage | None = None
+
+
+class ResponseInputTokens(_Base):
+    input_tokens: int = 0
+    total_tokens: int | None = None
+
+
 # ---- billing + auth ------------------------------------------------------
 
 
@@ -313,6 +358,11 @@ __all__ = [
     "ProviderList",
     "RegionInfo",
     "RegionList",
+    "ResponseContentPart",
+    "ResponseInputTokens",
+    "ResponseObject",
+    "ResponseOutputItem",
+    "ResponseUsage",
     "TrustRelease",
     "TrustReleaseDataPolicy",
     "TrustReleaseTLS",

@@ -24,11 +24,14 @@ from trustedrouter.models import (
     ModelList,
     ProviderList,
     RegionList,
+    ResponseInputTokens,
+    ResponseObject,
     TrustRelease,
 )
 
 DEFAULT_API_BASE_URL = "https://api.quillrouter.com/v1"
 DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
+DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
 AUTO_MODEL = "trustedrouter/auto"
 
 # Region routing — see https://trust.trustedrouter.com for the live list.
@@ -231,6 +234,56 @@ def _parse_sse_line(line: str) -> dict[str, Any] | None:
         return None
 
 
+def _event_from_sse_frame(lines: list[str]) -> dict[str, Any] | None:
+    event_name: str | None = None
+    data_parts: list[str] = []
+    for line in lines:
+        if line.startswith("event:"):
+            event_name = line[len("event:") :].strip()
+        elif line.startswith("data:"):
+            data_parts.append(line[len("data:") :].strip())
+    data = "\n".join(data_parts).strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        payload = jsonlib.loads(data)
+    except jsonlib.JSONDecodeError:
+        payload = {"data": data}
+    if event_name and isinstance(payload, dict) and "event" not in payload:
+        payload = {"event": event_name, **payload}
+    return payload if isinstance(payload, dict) else {"event": event_name, "data": payload}
+
+
+def _iter_sse_events(response: httpx.Response) -> Iterator[dict[str, Any]]:
+    frame: list[str] = []
+    for line in response.iter_lines():
+        if line:
+            frame.append(line)
+            continue
+        event = _event_from_sse_frame(frame)
+        frame = []
+        if event is not None:
+            yield event
+    event = _event_from_sse_frame(frame)
+    if event is not None:
+        yield event
+
+
+async def _aiter_sse_events(response: httpx.Response) -> AsyncIterator[dict[str, Any]]:
+    frame: list[str] = []
+    async for line in response.aiter_lines():
+        if line:
+            frame.append(line)
+            continue
+        event = _event_from_sse_frame(frame)
+        frame = []
+        if event is not None:
+            yield event
+    event = _event_from_sse_frame(frame)
+    if event is not None:
+        yield event
+
+
 def _delta_text(chunk: Mapping[str, Any]) -> str:
     choices = chunk.get("choices") or []
     if not choices:
@@ -326,6 +379,57 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _responses_body(
+    *,
+    model: str,
+    input: str | list[Mapping[str, Any]],
+    instructions: str | None,
+    stream: bool,
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    params_dict = dict(params)
+    for reserved in (
+        "api_key",
+        "extra_headers",
+        "idempotency_key",
+        "timeout",
+        "workspace_id",
+        "stream",
+    ):
+        params_dict.pop(reserved, None)
+    body: dict[str, Any] = {"model": model, "input": input, "stream": stream, **params_dict}
+    if instructions is not None:
+        body["instructions"] = instructions
+    return body
+
+
+def _broadcast_destination_body(
+    *,
+    type: str,
+    name: str,
+    endpoint: str | None,
+    enabled: bool,
+    include_content: bool,
+    method: str,
+    headers: Mapping[str, str] | None,
+    api_key: str | None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "type": type,
+        "name": name,
+        "enabled": enabled,
+        "include_content": include_content,
+        "method": method,
+    }
+    if endpoint is not None:
+        body["endpoint"] = endpoint
+    if headers is not None:
+        body["headers"] = dict(headers)
+    if api_key is not None:
+        body["api_key"] = api_key
+    return body
+
+
 # ---- sync client ---------------------------------------------------------
 
 
@@ -393,6 +497,7 @@ class TrustedRouter:
         *,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        api_key: str | None = None,
         workspace_id: str | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
@@ -405,8 +510,9 @@ class TrustedRouter:
         selected_workspace_id = workspace_id if workspace_id is not None else self.workspace_id
         if selected_workspace_id:
             merged_headers["x-trustedrouter-workspace"] = selected_workspace_id
-        if self.api_key:
-            merged_headers["authorization"] = f"Bearer {self.api_key}"
+        selected_api_key = api_key if api_key is not None else self.api_key
+        if selected_api_key:
+            merged_headers["authorization"] = f"Bearer {selected_api_key}"
         url = f"{self.base_url}/{path.lstrip('/')}"
         kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
         if timeout is not None:
@@ -589,6 +695,136 @@ class TrustedRouter:
         }
         return MessagesResponse.model_validate(self.request("POST", "/messages", json=body))
 
+    def responses(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> ResponseObject:
+        """Create a stateless OpenAI Responses API request."""
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=False,
+            params=params,
+        )
+        return ResponseObject.model_validate(
+            self.request(
+                "POST",
+                "/responses",
+                json=body,
+                headers=extra_headers,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key,
+                timeout=timeout,
+            )
+        )
+
+    def responses_stream(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield parsed Responses SSE events as dictionaries."""
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=True,
+            params=params,
+        )
+        req = _build_stream_request(
+            "POST",
+            f"{self.base_url}/responses",
+            body=body,
+            api_key=api_key if api_key is not None else self.api_key,
+            extra_headers=extra_headers,
+            idempotency_key=idempotency_key,
+            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+            timeout=timeout,
+        )
+        with self._client.stream(**req) as response:
+            if response.is_error:
+                _raise_for_stream_response(response)
+            yield from _iter_sse_events(response)
+
+    def responses_raw_stream(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> Iterator[bytes]:
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=True,
+            params=params,
+        )
+        req = _build_stream_request(
+            "POST",
+            f"{self.base_url}/responses",
+            body=body,
+            api_key=api_key if api_key is not None else self.api_key,
+            extra_headers=extra_headers,
+            idempotency_key=idempotency_key,
+            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+            timeout=timeout,
+        )
+        with self._client.stream(**req) as response:
+            if response.is_error:
+                _raise_for_stream_response(response)
+            yield from response.iter_bytes()
+
+    def responses_input_tokens(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        workspace_id: str | None = None,
+        **params: Any,
+    ) -> ResponseInputTokens:
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=False,
+            params=params,
+        )
+        return ResponseInputTokens.model_validate(
+            self.request(
+                "POST",
+                "/responses/input_tokens",
+                json=body,
+                workspace_id=workspace_id,
+            )
+        )
+
     def billing_checkout(
         self,
         *,
@@ -637,6 +873,88 @@ class TrustedRouter:
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
         return ActivityList.model_validate(self.request("GET", f"/activity{suffix}"))
+
+    def broadcast_destinations(self, *, workspace_id: str | None = None) -> dict[str, Any]:
+        return self.request("GET", "/broadcast/destinations", workspace_id=workspace_id)
+
+    def create_broadcast_destination(
+        self,
+        *,
+        type: str,
+        name: str = "Broadcast destination",
+        endpoint: str | None = None,
+        enabled: bool = True,
+        include_content: bool = False,
+        method: str = "POST",
+        headers: Mapping[str, str] | None = None,
+        api_key: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        body = _broadcast_destination_body(
+            type=type,
+            name=name,
+            endpoint=endpoint,
+            enabled=enabled,
+            include_content=include_content,
+            method=method,
+            headers=headers,
+            api_key=api_key,
+        )
+        return self.request("POST", "/broadcast/destinations", json=body, workspace_id=workspace_id)
+
+    def get_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.request(
+            "GET",
+            f"/broadcast/destinations/{destination_id}",
+            workspace_id=workspace_id,
+        )
+
+    def update_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+        **patch: Any,
+    ) -> dict[str, Any]:
+        return self.request(
+            "PATCH",
+            f"/broadcast/destinations/{destination_id}",
+            json={key: value for key, value in patch.items() if value is not None},
+            workspace_id=workspace_id,
+        )
+
+    def delete_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.request(
+            "DELETE",
+            f"/broadcast/destinations/{destination_id}",
+            workspace_id=workspace_id,
+        )
+
+    def test_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.request(
+            "POST",
+            f"/broadcast/destinations/{destination_id}/test",
+            workspace_id=workspace_id,
+        )
+
+    def status(self, url: str = DEFAULT_STATUS_URL) -> dict[str, Any]:
+        response = self._client.get(url)
+        return _json_or_raise(response)
 
     def attestation(self) -> bytes:
         """Fetch the gateway's live attestation document. Returns the raw
@@ -719,6 +1037,7 @@ class AsyncTrustedRouter:
         *,
         json: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
+        api_key: str | None = None,
         workspace_id: str | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
@@ -731,8 +1050,9 @@ class AsyncTrustedRouter:
         selected_workspace_id = workspace_id if workspace_id is not None else self.workspace_id
         if selected_workspace_id:
             merged_headers["x-trustedrouter-workspace"] = selected_workspace_id
-        if self.api_key:
-            merged_headers["authorization"] = f"Bearer {self.api_key}"
+        selected_api_key = api_key if api_key is not None else self.api_key
+        if selected_api_key:
+            merged_headers["authorization"] = f"Bearer {selected_api_key}"
         url = f"{self.base_url}/{path.lstrip('/')}"
         kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
         if timeout is not None:
@@ -924,6 +1244,136 @@ class AsyncTrustedRouter:
             await self.request("POST", "/messages", json=body)
         )
 
+    async def responses(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> ResponseObject:
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=False,
+            params=params,
+        )
+        return ResponseObject.model_validate(
+            await self.request(
+                "POST",
+                "/responses",
+                json=body,
+                headers=extra_headers,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key,
+                timeout=timeout,
+            )
+        )
+
+    async def responses_stream(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=True,
+            params=params,
+        )
+        req = _build_stream_request(
+            "POST",
+            f"{self.base_url}/responses",
+            body=body,
+            api_key=api_key if api_key is not None else self.api_key,
+            extra_headers=extra_headers,
+            idempotency_key=idempotency_key,
+            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+            timeout=timeout,
+        )
+        async with self._client.stream(**req) as response:
+            if response.is_error:
+                await _araise_for_stream_response(response)
+            async for event in _aiter_sse_events(response):
+                yield event
+
+    async def responses_raw_stream(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> AsyncIterator[bytes]:
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=True,
+            params=params,
+        )
+        req = _build_stream_request(
+            "POST",
+            f"{self.base_url}/responses",
+            body=body,
+            api_key=api_key if api_key is not None else self.api_key,
+            extra_headers=extra_headers,
+            idempotency_key=idempotency_key,
+            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+            timeout=timeout,
+        )
+        async with self._client.stream(**req) as response:
+            if response.is_error:
+                await _araise_for_stream_response(response)
+            async for chunk in response.aiter_bytes():
+                yield chunk
+
+    async def responses_input_tokens(
+        self,
+        *,
+        model: str = AUTO_MODEL,
+        input: str | list[Mapping[str, Any]],
+        instructions: str | None = None,
+        workspace_id: str | None = None,
+        **params: Any,
+    ) -> ResponseInputTokens:
+        body = _responses_body(
+            model=model,
+            input=input,
+            instructions=instructions,
+            stream=False,
+            params=params,
+        )
+        return ResponseInputTokens.model_validate(
+            await self.request(
+                "POST",
+                "/responses/input_tokens",
+                json=body,
+                workspace_id=workspace_id,
+            )
+        )
+
     async def billing_checkout(
         self,
         *,
@@ -966,6 +1416,93 @@ class AsyncTrustedRouter:
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
         return ActivityList.model_validate(await self.request("GET", f"/activity{suffix}"))
+
+    async def broadcast_destinations(self, *, workspace_id: str | None = None) -> dict[str, Any]:
+        return await self.request("GET", "/broadcast/destinations", workspace_id=workspace_id)
+
+    async def create_broadcast_destination(
+        self,
+        *,
+        type: str,
+        name: str = "Broadcast destination",
+        endpoint: str | None = None,
+        enabled: bool = True,
+        include_content: bool = False,
+        method: str = "POST",
+        headers: Mapping[str, str] | None = None,
+        api_key: str | None = None,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        body = _broadcast_destination_body(
+            type=type,
+            name=name,
+            endpoint=endpoint,
+            enabled=enabled,
+            include_content=include_content,
+            method=method,
+            headers=headers,
+            api_key=api_key,
+        )
+        return await self.request(
+            "POST",
+            "/broadcast/destinations",
+            json=body,
+            workspace_id=workspace_id,
+        )
+
+    async def get_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "GET",
+            f"/broadcast/destinations/{destination_id}",
+            workspace_id=workspace_id,
+        )
+
+    async def update_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+        **patch: Any,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "PATCH",
+            f"/broadcast/destinations/{destination_id}",
+            json={key: value for key, value in patch.items() if value is not None},
+            workspace_id=workspace_id,
+        )
+
+    async def delete_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "DELETE",
+            f"/broadcast/destinations/{destination_id}",
+            workspace_id=workspace_id,
+        )
+
+    async def test_broadcast_destination(
+        self,
+        destination_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "POST",
+            f"/broadcast/destinations/{destination_id}/test",
+            workspace_id=workspace_id,
+        )
+
+    async def status(self, url: str = DEFAULT_STATUS_URL) -> dict[str, Any]:
+        response = await self._client.get(url)
+        return _json_or_raise(response)
 
     async def attestation(self) -> bytes:
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
