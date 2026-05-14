@@ -272,6 +272,30 @@ def test_request_fails_over_to_regional_endpoint_on_503(monkeypatch: pytest.Monk
     sdk.close()
 
 
+def test_request_transport_error_fails_over_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise httpx.ConnectError("dns failure", request=request)
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+    with pytest.raises(InternalError) as exc_info:
+        sdk.models()
+    assert exc_info.value.status_code == 503
+    assert calls["count"] == 2
+    sdk.close()
+
+
 def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
     seen_hosts: list[str] = []
@@ -303,6 +327,37 @@ def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.Monk
     assert seen_idempotency_keys[0] is not None
     assert seen_idempotency_keys[0].startswith("tr-req-")
     assert seen_idempotency_keys == [seen_idempotency_keys[0], seen_idempotency_keys[0]]
+    sdk.close()
+
+
+def test_chat_stream_transport_error_before_response_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+    assert list(
+        sdk.chat_completions_stream(model="m", messages=[{"role": "user", "content": "x"}])
+    ) == ["ok"]
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
     sdk.close()
 
 
@@ -394,6 +449,33 @@ def test_async_request_fails_over_to_regional_endpoint_on_503(
 
     asyncio.run(run())
     assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+
+
+def test_async_request_transport_error_fails_over_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        raise httpx.ConnectError("dns failure", request=request)
+
+    async def run() -> None:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_retries=1,
+            regional_failover=True,
+            failover_regions=("europe-west4",),
+        )
+        with pytest.raises(InternalError) as exc_info:
+            await sdk.models()
+        assert exc_info.value.status_code == 503
+        await sdk._client.aclose()
+
+    asyncio.run(run())
+    assert calls["count"] == 2
 
 
 def test_retry_sleep_returns_at_least_retry_after() -> None:
@@ -557,6 +639,34 @@ def test_chat_completions_workspace_override_is_header_not_body() -> None:
     sdk.close()
 
 
+def test_chat_completions_chunk_stream_returns_typed_chunks() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"m",'
+                b'"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+    chunks = list(
+        sdk.chat_completions_chunk_stream(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    )
+    assert chunks[0].id == "chatcmpl_1"
+    assert chunks[0].choices[0].delta.content == "hello"
+    sdk.close()
+
+
 # ---- embeddings + messages wrappers ------------------------------------
 
 
@@ -710,6 +820,119 @@ def test_sync_responses_stream_yields_responses_sse_events() -> None:
     assert events[1]["delta"] == "pong"
 
 
+def test_sync_responses_stream_fails_over_with_same_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host or "", request.headers.get("idempotency-key")))
+        if len(seen) == 1:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_2"}}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+    events = list(sdk.responses_stream(input="ping"))
+    sdk.close()
+
+    assert events[0]["event"] == "response.completed"
+    assert seen[0][0] == "api.quillrouter.com"
+    assert seen[1][0] == "api-europe-west4.quillrouter.com"
+    assert seen[0][1] is not None
+    assert seen[0][1] == seen[1][1]
+
+
+def test_sync_responses_raw_stream_passes_through_bytes_and_fails_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b"event: response.created\n"
+            b'data: {"type":"response.created"}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+    raw = b"".join(sdk.responses_raw_stream(input="ping"))
+    sdk.close()
+
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert b"response.created" in raw
+    assert b"[DONE]" in raw
+
+
+def test_sync_responses_raw_stream_raises_typed_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "0"}, text="slow down")
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+    with pytest.raises(RateLimitError) as exc_info:
+        list(sdk.responses_raw_stream(input="ping"))
+    assert exc_info.value.status_code == 429
+    sdk.close()
+
+
+def test_sync_responses_raw_stream_transport_error_fails_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b"event: response.completed\n"
+            b'data: {"type":"response.completed"}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+    assert b"response.completed" in b"".join(sdk.responses_raw_stream(input="ping"))
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    sdk.close()
+
+
 def test_sync_responses_input_tokens_wrapper() -> None:
     seen_paths: list[str] = []
 
@@ -765,6 +988,69 @@ def test_sync_broadcast_destination_helpers_and_status() -> None:
     assert seen[1][3]["headers"] == {"Authorization": "Bearer x"}
     assert seen[2][0:3] == ("POST", "/v1/broadcast/destinations/bdst_1/test", "ws_default")
     assert seen[3][1] == "/status.json"
+
+
+def test_sync_broadcast_update_delete_auth_logout_and_stablecoin_checkout() -> None:
+    seen: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content.decode()) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        if request.url.path == "/v1/billing/checkout":
+            return httpx.Response(200, json={"data": {"url": "https://stripe.test/session"}})
+        return httpx.Response(200, json={"data": {"ok": True}})
+
+    sdk = TrustedRouter(api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    sdk.update_broadcast_destination("bdst_1", enabled=False, endpoint=None, name="Events")
+    sdk.delete_broadcast_destination("bdst_1")
+    sdk.auth_session()
+    sdk.logout()
+    sdk.stablecoin_checkout(amount="25", workspace_id="ws_1")
+    sdk.close()
+
+    assert seen[0] == (
+        "PATCH",
+        "/v1/broadcast/destinations/bdst_1",
+        {"enabled": False, "name": "Events"},
+    )
+    assert seen[1][0:2] == ("DELETE", "/v1/broadcast/destinations/bdst_1")
+    assert seen[2][0:2] == ("GET", "/v1/auth/session")
+    assert seen[3][0:2] == ("POST", "/v1/auth/logout")
+    assert seen[4][2] == {
+        "amount": "25",
+        "payment_method": "stablecoin",
+        "workspace_id": "ws_1",
+    }
+
+
+def test_sync_create_broadcast_destination_includes_optional_api_key_and_endpoint() -> None:
+    seen_body: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_body.append(jsonlib.loads(request.content.decode()))
+        return httpx.Response(200, json={"data": {"id": "bdst_1"}})
+
+    sdk = TrustedRouter(api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    sdk.create_broadcast_destination(
+        type="posthog",
+        name="PostHog",
+        endpoint="https://us.i.posthog.com",
+        api_key="phc_secret",
+        include_content=True,
+    )
+    sdk.close()
+
+    assert seen_body == [
+        {
+            "type": "posthog",
+            "name": "PostHog",
+            "enabled": True,
+            "include_content": True,
+            "method": "POST",
+            "endpoint": "https://us.i.posthog.com",
+            "api_key": "phc_secret",
+        }
+    ]
 
 
 def test_async_embeddings_and_messages() -> None:
@@ -838,6 +1124,193 @@ def test_async_responses_wrapper_and_stream() -> None:
     assert events[0]["event"] == "response.completed"
 
 
+def test_async_chat_stream_and_chunk_stream_fail_over_before_first_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host or "", request.headers.get("idempotency-key")))
+        if len(seen) in {1, 3}:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"id":"chatcmpl_1","object":"chat.completion.chunk",'
+                b'"choices":[{"index":0,"delta":{"content":"OK"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+
+    async def run() -> tuple[list[str], int]:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_retries=1,
+            regional_failover=True,
+            failover_regions=("europe-west4",),
+        )
+        text = [
+            token
+            async for token in sdk.chat_completions_stream(
+                model="m",
+                messages=[{"role": "user", "content": "x"}],
+            )
+        ]
+        chunks = [
+            chunk
+            async for chunk in sdk.chat_completions_chunk_stream(
+                model="m",
+                messages=[{"role": "user", "content": "x"}],
+            )
+        ]
+        await sdk._client.aclose()
+        return text, len(chunks)
+
+    text, chunk_count = asyncio.run(run())
+
+    assert text == ["OK"]
+    assert chunk_count == 1
+    assert [host for host, _ in seen] == [
+        "api.quillrouter.com",
+        "api-europe-west4.quillrouter.com",
+        "api.quillrouter.com",
+        "api-europe-west4.quillrouter.com",
+    ]
+    assert seen[0][1] == seen[1][1]
+    assert seen[2][1] == seen[3][1]
+    assert seen[0][1] != seen[2][1]
+
+
+def test_async_responses_raw_stream_and_input_tokens_and_status() -> None:
+    seen: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content.decode()) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        if request.url.host == "status.example":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/v1/responses/input_tokens":
+            return httpx.Response(200, json={"input_tokens": 9, "total_tokens": 9})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b"event: response.created\n"
+            b'data: {"type":"response.created"}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    async def run() -> tuple[bytes, int, str]:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        raw = b"".join([chunk async for chunk in sdk.responses_raw_stream(input="ping")])
+        tokens = await sdk.responses_input_tokens(input="count me")
+        status = await sdk.status("https://status.example/status.json")
+        await sdk._client.aclose()
+        return raw, tokens.input_tokens, str(status["status"])
+
+    raw, input_tokens, status = asyncio.run(run())
+
+    assert b"response.created" in raw
+    assert input_tokens == 9
+    assert status == "ok"
+    assert seen[0][1] == "/v1/responses"
+    assert seen[0][2] is not None
+    assert seen[0][2]["stream"] is True
+    assert seen[1][1] == "/v1/responses/input_tokens"
+    assert seen[2][1] == "/status.json"
+
+
+def test_async_responses_raw_stream_regional_failover_and_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b"event: response.created\n"
+            b'data: {"type":"response.created"}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    async def ok() -> bytes:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_retries=1,
+            regional_failover=True,
+            failover_regions=("europe-west4",),
+        )
+        raw = b"".join([chunk async for chunk in sdk.responses_raw_stream(input="ping")])
+        await sdk._client.aclose()
+        return raw
+
+    assert b"response.created" in asyncio.run(ok())
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+
+    def error_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(501, json={"error": {"message": "nope"}})
+
+    async def err() -> None:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(error_handler)),
+            max_retries=0,
+        )
+        with pytest.raises(EndpointNotSupportedError):
+            _ = [chunk async for chunk in sdk.responses_raw_stream(input="ping")]
+        await sdk._client.aclose()
+
+    asyncio.run(err())
+
+
+def test_async_responses_stream_regional_failover_preserves_idempotency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host or "", request.headers.get("idempotency-key")))
+        if len(seen) == 1:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+            b"data: [DONE]\n\n",
+        )
+
+    async def run() -> list[dict[str, object]]:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_retries=1,
+            regional_failover=True,
+            failover_regions=("europe-west4",),
+        )
+        events = [event async for event in sdk.responses_stream(input="ping")]
+        await sdk._client.aclose()
+        return events
+
+    events = asyncio.run(run())
+
+    assert events[0]["event"] == "response.completed"
+    assert seen[0] == ("api.quillrouter.com", seen[0][1])
+    assert seen[1] == ("api-europe-west4.quillrouter.com", seen[0][1])
+
+
 def test_async_broadcast_destination_helpers() -> None:
     seen: list[tuple[str, str, str | None]] = []
 
@@ -865,6 +1338,30 @@ def test_async_broadcast_destination_helpers() -> None:
     assert seen == [
         ("GET", "/v1/broadcast/destinations/bdst_1", "ws_override"),
         ("DELETE", "/v1/broadcast/destinations/bdst_1", "ws_default"),
+    ]
+
+
+def test_async_broadcast_update_and_test_helpers() -> None:
+    seen: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content.decode()) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        return httpx.Response(200, json={"data": {"id": "bdst_1"}})
+
+    async def run() -> None:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        await sdk.update_broadcast_destination("bdst_1", endpoint=None, enabled=True)
+        await sdk.test_broadcast_destination("bdst_1")
+        await sdk._client.aclose()
+
+    asyncio.run(run())
+    assert seen == [
+        ("PATCH", "/v1/broadcast/destinations/bdst_1", {"enabled": True}),
+        ("POST", "/v1/broadcast/destinations/bdst_1/test", None),
     ]
 
 

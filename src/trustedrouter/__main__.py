@@ -17,10 +17,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import ssl
 import sys
-
-import httpx
 
 from trustedrouter import (
     AUTO_MODEL,
@@ -143,8 +142,9 @@ def _cmd_attest(args: argparse.Namespace) -> int:
             host, port_str = host.rsplit(":", 1)
             port = int(port_str)
         ctx = ssl.create_default_context()
+        raw_sock = socket.create_connection((host, port), timeout=10.0)
         with ctx.wrap_socket(
-            httpx._network.create_socket((host, port)),  # type: ignore[attr-defined]
+            raw_sock,
             server_hostname=host,
         ) as ssock:
             cert_der = ssock.getpeercert(binary_form=True)

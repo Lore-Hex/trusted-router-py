@@ -5,6 +5,8 @@ prove parser routing + exit codes + error formatting, not to
 re-validate the SDK itself."""
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -166,3 +168,90 @@ def test_attest_raw_prints_jwt_bytes_to_stdout(
     rc = cli.main(["attest"])
     assert rc == 0
     assert capsysbinary.readouterr().out == b"<JWT-BYTES>"
+
+
+def test_trust_command_success_and_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "fetch_trust_release", lambda: {"image_digest": "sha256:test"})
+    assert cli.main(["trust"]) == 0
+    assert "sha256:test" in capsys.readouterr().out
+
+    def fail() -> object:
+        raise RuntimeError("trust unavailable")
+
+    monkeypatch.setattr(cli, "fetch_trust_release", fail)
+    assert cli.main(["trust"]) == 1
+    assert "trust unavailable" in capsys.readouterr().err
+
+
+def test_attest_verify_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeSSLSocket:
+        def __enter__(self) -> FakeSSLSocket:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def getpeercert(self, *, binary_form: bool = False) -> bytes:
+            assert binary_form is True
+            return b"cert-der"
+
+    class FakeSSLContext:
+        def wrap_socket(self, _sock: object, *, server_hostname: str) -> FakeSSLSocket:
+            assert server_hostname == "api.quillrouter.com"
+            return FakeSSLSocket()
+
+    class FakeResult:
+        def as_dict(self) -> dict[str, str]:
+            return {"status": "verified"}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<JWT>")
+
+    def fake_verify(
+        document: bytes,
+        *,
+        policy: object,
+        tls_cert_der: bytes,
+    ) -> FakeResult:
+        assert document == b"<JWT>"
+        assert policy == {"policy": "ok"}
+        assert tls_cert_der == b"cert-der"
+        return FakeResult()
+
+    _patch_client(monkeypatch, handler)
+    monkeypatch.setattr(cli.ssl, "create_default_context", lambda: FakeSSLContext())
+    monkeypatch.setattr(cli.socket, "create_connection", lambda _target, timeout: object())
+    import trustedrouter.attestation as attestation
+
+    monkeypatch.setattr(attestation, "policy_from_trust_release", lambda: {"policy": "ok"})
+    monkeypatch.setattr(attestation, "verify_gateway_attestation", fake_verify)
+
+    rc = cli.main(["attest", "--verify"])
+    assert rc == 0
+    assert "verified" in capsys.readouterr().out
+
+
+def test_attest_verify_error_returns_code_1(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<JWT>")
+
+    _patch_client(monkeypatch, handler)
+
+    class BrokenSSL:
+        def wrap_socket(self, *_args: Any, **_kwargs: Any) -> object:
+            raise RuntimeError("no tls")
+
+    monkeypatch.setattr(cli.ssl, "create_default_context", lambda: BrokenSSL())
+    monkeypatch.setattr(cli.socket, "create_connection", lambda _target, timeout: object())
+    rc = cli.main(["attest", "--verify"])
+    assert rc == 1
+    assert "no tls" in capsys.readouterr().err
