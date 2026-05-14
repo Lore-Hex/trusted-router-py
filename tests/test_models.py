@@ -83,7 +83,9 @@ def test_model_list_by_id_lookup_returns_model_or_none() -> None:
             {"id": "b", "name": "B"},
         ],
     })
-    assert listing.by_id("a").id == "a"
+    model = listing.by_id("a")
+    assert model is not None
+    assert model.id == "a"
     assert listing.by_id("missing") is None
     # Iteration over .data is the canonical walk
     assert [m.id for m in listing.data] == ["a", "b"]

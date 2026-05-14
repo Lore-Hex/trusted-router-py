@@ -3,6 +3,8 @@ chat.completion.chunk frames into a single chat.completion dict (so
 callers asking for stream=False still get an OpenAI-shape result)."""
 from __future__ import annotations
 
+from typing import Any
+
 from trustedrouter.client import _collect_completion
 
 
@@ -21,7 +23,7 @@ def test_empty_chunk_list_returns_minimal_assistant_envelope() -> None:
 def test_concatenates_text_deltas_and_propagates_id_model_created() -> None:
     """Last chunk wins for envelope fields (id/model/created); content
     is the concatenation of every delta string in order."""
-    chunks = [
+    chunks: list[dict[str, Any]] = [
         {"id": "first", "model": "m-1", "created": 100,
          "choices": [{"delta": {"content": "hel"}}]},
         {"id": "mid", "model": "m-2", "created": 101,
@@ -41,7 +43,7 @@ def test_skips_chunks_with_no_choices_array() -> None:
     """Some providers send heartbeat-style chunks with no `choices` —
     we must not crash and must not contribute anything to the rolled-up
     text."""
-    chunks = [
+    chunks: list[dict[str, Any]] = [
         {"id": "a", "choices": []},
         {"id": "b"},  # no choices key at all
         {"id": "c", "choices": [{"delta": {"content": "hi"}}]},
@@ -54,7 +56,7 @@ def test_non_string_content_delta_is_ignored() -> None:
     """Defensive: if a provider sends `content: null` or a non-string
     type, _collect_completion shouldn't crash. The valid string deltas
     around it must still concatenate cleanly."""
-    chunks = [
+    chunks: list[dict[str, Any]] = [
         {"choices": [{"delta": {"content": "ok "}}]},
         {"choices": [{"delta": {"content": None}}]},   # provider quirk
         {"choices": [{"delta": {"content": ["a", "b"]}}]},  # malformed

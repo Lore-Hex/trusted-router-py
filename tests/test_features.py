@@ -1,10 +1,12 @@
 """Coverage for the v0.2 feature set: typed errors, retries, region
 shortcut, per-call extras (headers/idempotency/timeout), embeddings,
 messages, User-Agent header, async activity()."""
+
 from __future__ import annotations
 
 import asyncio
 import json as jsonlib
+from typing import Any
 
 import httpx
 import pytest
@@ -30,6 +32,7 @@ from trustedrouter.client import _retry_sleep, _user_agent
 
 def test_region_base_url_known_regions() -> None:
     assert region_base_url("europe-west4") == "https://api-europe-west4.quillrouter.com/v1"
+    assert region_base_url("us-east4") == "https://api-us-east4.quillrouter.com/v1"
     assert region_base_url("us-central1") == "https://api.quillrouter.com/v1"
 
 
@@ -82,9 +85,13 @@ def test_async_constructor_region_collision() -> None:
         (503, InternalError),
     ],
 )
-def test_status_codes_map_to_typed_subclasses(status: int, exc_class: type) -> None:
+def test_status_codes_map_to_typed_subclasses(
+    status: int,
+    exc_class: type[TrustedRouterError],
+) -> None:
     """Every typed subclass also IS a TrustedRouterError, so old `except
     TrustedRouterError` blocks keep working."""
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, json={"error": {"message": "boom"}})
 
@@ -155,9 +162,11 @@ def test_workspace_id_header_can_be_set_on_client_or_per_call() -> None:
 def test_rate_limit_error_with_invalid_retry_after_is_none() -> None:
     """Some servers send Retry-After as a date — we don't honor that
     form; fall back to None (and our exponential backoff)."""
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            429, headers={"Retry-After": "Tue, 15 Nov 2025 12:00:00 GMT"},
+            429,
+            headers={"Retry-After": "Tue, 15 Nov 2025 12:00:00 GMT"},
             json={"error": {"message": "x"}},
         )
 
@@ -176,6 +185,7 @@ def test_typed_errors_also_raised_by_streaming_chat() -> None:
     """A 401 during stream open must raise AuthenticationError, not the
     generic TrustedRouterError (regression target for our typed-error
     rollout in the streaming path)."""
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": {"message": "bad key"}})
 
@@ -199,8 +209,9 @@ def test_request_retries_on_429_then_succeeds() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         state["calls"] += 1
         if state["calls"] < 3:
-            return httpx.Response(429, headers={"Retry-After": "0"},
-                                  json={"error": {"message": "x"}})
+            return httpx.Response(
+                429, headers={"Retry-After": "0"}, json={"error": {"message": "x"}}
+            )
         return httpx.Response(200, json={"data": [{"id": "ok", "name": "ok"}]})
 
     sdk = TrustedRouter(
@@ -220,8 +231,9 @@ def test_request_retries_on_5xx_then_gives_up() -> None:
 
     def handler(_request: httpx.Request) -> httpx.Response:
         state["calls"] += 1
-        return httpx.Response(503, headers={"Retry-After": "0"},
-                              json={"error": {"message": "down"}})
+        return httpx.Response(
+            503, headers={"Retry-After": "0"}, json={"error": {"message": "down"}}
+        )
 
     sdk = TrustedRouter(
         api_key="k",
@@ -235,13 +247,71 @@ def test_request_retries_on_5xx_then_gives_up() -> None:
     sdk.close()
 
 
+def test_request_fails_over_to_regional_endpoint_on_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(200, json={"data": []})
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+
+    result = sdk.models()
+
+    assert result.data == []
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    sdk.close()
+
+
+def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+    seen_idempotency_keys: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        seen_idempotency_keys.append(request.headers.get("idempotency-key"))
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, text="regional gateway unavailable")
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n',
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+        failover_regions=("europe-west4",),
+    )
+
+    assert list(
+        sdk.chat_completions_stream(model="m", messages=[{"role": "user", "content": "x"}])
+    ) == ["OK"]
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_idempotency_keys[0] is not None
+    assert seen_idempotency_keys[0].startswith("tr-req-")
+    assert seen_idempotency_keys == [seen_idempotency_keys[0], seen_idempotency_keys[0]]
+    sdk.close()
+
+
 def test_max_retries_zero_disables_retry_loop_entirely() -> None:
     state = {"calls": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
         state["calls"] += 1
-        return httpx.Response(503, headers={"Retry-After": "0"},
-                              json={"error": {"message": "x"}})
+        return httpx.Response(503, headers={"Retry-After": "0"}, json={"error": {"message": "x"}})
 
     sdk = TrustedRouter(
         api_key="k",
@@ -279,8 +349,9 @@ def test_async_request_retries_on_503() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         state["calls"] += 1
         if state["calls"] < 2:
-            return httpx.Response(503, headers={"Retry-After": "0"},
-                                  json={"error": {"message": "x"}})
+            return httpx.Response(
+                503, headers={"Retry-After": "0"}, json={"error": {"message": "x"}}
+            )
         return httpx.Response(200, json={"data": []})
 
     async def run() -> None:
@@ -295,6 +366,34 @@ def test_async_request_retries_on_503() -> None:
 
     asyncio.run(run())
     assert state["calls"] == 2
+
+
+def test_async_request_fails_over_to_regional_endpoint_on_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, json={"error": {"message": "region down"}})
+        return httpx.Response(200, json={"data": []})
+
+    async def run() -> None:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_retries=1,
+            regional_failover=True,
+            failover_regions=("europe-west4",),
+        )
+        result = await sdk.models()
+        assert result.data == []
+        await sdk._client.aclose()
+
+    asyncio.run(run())
+    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
 
 
 def test_retry_sleep_returns_at_least_retry_after() -> None:
@@ -324,9 +423,10 @@ def test_extra_headers_propagate_to_chat_request() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(dict(request.headers))
         return httpx.Response(
-            200, headers={"content-type": "text/event-stream"},
+            200,
+            headers={"content-type": "text/event-stream"},
             content=b'data: {"choices":[{"delta":{"content":"x"},'
-                    b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+            b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
         )
 
     sdk = TrustedRouter(
@@ -359,16 +459,48 @@ def test_idempotency_key_is_sent_on_request_and_chat() -> None:
     sdk.close()
 
 
+def test_chat_completions_preserves_explicit_idempotency_key() -> None:
+    seen: list[tuple[str | None, dict[str, object]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (
+                request.headers.get("idempotency-key"),
+                jsonlib.loads(request.content.decode()),
+            )
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}\n\n',
+        )
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=0,
+    )
+    sdk.chat_completions(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        idempotency_key="caller-key-1",
+    )
+    assert seen[0][0] == "caller-key-1"
+    assert "idempotency_key" not in seen[0][1]
+    sdk.close()
+
+
 def test_chat_completions_drops_reserved_kwargs_from_body() -> None:
     """If a caller spreads a dict into **params that includes our
     reserved kwargs (api_key, idempotency_key, etc.), they must not
     leak into the JSON body sent to the gateway."""
-    bodies: list[dict[str, object]] = []
+    bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         bodies.append(jsonlib.loads(request.content.decode()))
         return httpx.Response(
-            200, headers={"content-type": "text/event-stream"},
+            200,
+            headers={"content-type": "text/event-stream"},
             content=b'data: {"choices":[{"delta":{"content":"x"}}]}\n\ndata: [DONE]\n\n',
         )
 
@@ -377,7 +509,11 @@ def test_chat_completions_drops_reserved_kwargs_from_body() -> None:
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=0,
     )
-    extra = {"temperature": 0.5, "api_key": "leaked", "idempotency_key": "leaked"}
+    extra: dict[str, Any] = {
+        "temperature": 0.5,
+        "api_key": "leaked",
+        "idempotency_key": "leaked",
+    }
     sdk.chat_completions(model="m", messages=[{"role": "user", "content": "hi"}], **extra)
     assert bodies[0]["temperature"] == 0.5
     assert "api_key" not in bodies[0]
@@ -389,10 +525,12 @@ def test_chat_completions_workspace_override_is_header_not_body() -> None:
     seen: list[tuple[str | None, dict[str, object]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((
-            request.headers.get("x-trustedrouter-workspace"),
-            jsonlib.loads(request.content.decode()),
-        ))
+        seen.append(
+            (
+                request.headers.get("x-trustedrouter-workspace"),
+                jsonlib.loads(request.content.decode()),
+            )
+        )
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -423,7 +561,7 @@ def test_chat_completions_workspace_override_is_header_not_body() -> None:
 
 
 def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
-    bodies: list[dict[str, object]] = []
+    bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         bodies.append(jsonlib.loads(request.content.decode()))
@@ -474,7 +612,7 @@ def test_embeddings_not_supported_maps_to_typed_error() -> None:
 
 
 def test_sync_messages_anthropic_shape() -> None:
-    bodies: list[dict[str, object]] = []
+    bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         bodies.append(jsonlib.loads(request.content.decode()))
@@ -497,13 +635,16 @@ def test_sync_messages_anthropic_shape() -> None:
 
 
 def test_sync_responses_wrapper_sends_workspace_header_not_body() -> None:
-    seen: list[tuple[str | None, dict[str, object]]] = []
+    seen: list[tuple[str | None, str | None, dict[str, object]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((
-            request.headers.get("x-trustedrouter-workspace"),
-            jsonlib.loads(request.content.decode()),
-        ))
+        seen.append(
+            (
+                request.headers.get("x-trustedrouter-workspace"),
+                request.headers.get("idempotency-key"),
+                jsonlib.loads(request.content.decode()),
+            )
+        )
         return httpx.Response(
             200,
             json={
@@ -535,14 +676,16 @@ def test_sync_responses_wrapper_sends_workspace_header_not_body() -> None:
 
     assert result.id == "resp_1"
     assert seen[0][0] == "ws_override"
-    assert seen[0][1]["model"] == AUTO_MODEL
-    assert seen[0][1]["input"] == "ping"
-    assert seen[0][1]["stream"] is False
-    assert "workspace_id" not in seen[0][1]
+    assert seen[0][1] is not None
+    assert seen[0][1].startswith("tr-req-")
+    assert seen[0][2]["model"] == AUTO_MODEL
+    assert seen[0][2]["input"] == "ping"
+    assert seen[0][2]["stream"] is False
+    assert "workspace_id" not in seen[0][2]
 
 
 def test_sync_responses_stream_yields_responses_sse_events() -> None:
-    seen_bodies: list[dict[str, object]] = []
+    seen_bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_bodies.append(jsonlib.loads(request.content.decode()))
@@ -587,12 +730,14 @@ def test_sync_broadcast_destination_helpers_and_status() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = jsonlib.loads(request.content.decode()) if request.content else None
-        seen.append((
-            request.method,
-            request.url.path,
-            request.headers.get("x-trustedrouter-workspace"),
-            body,
-        ))
+        seen.append(
+            (
+                request.method,
+                request.url.path,
+                request.headers.get("x-trustedrouter-workspace"),
+                body,
+            )
+        )
         if request.url.host == "status.example":
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(200, json={"data": {"id": "bdst_1"}})
@@ -635,8 +780,9 @@ def test_async_embeddings_and_messages() -> None:
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         await sdk.embeddings(model="e", input="x")
-        await sdk.messages(model="anthropic/claude-3-5-sonnet",
-                           messages=[{"role": "user", "content": "x"}])
+        await sdk.messages(
+            model="anthropic/claude-3-5-sonnet", messages=[{"role": "user", "content": "x"}]
+        )
         await sdk._client.aclose()
 
     asyncio.run(run())
@@ -644,11 +790,18 @@ def test_async_embeddings_and_messages() -> None:
 
 
 def test_async_responses_wrapper_and_stream() -> None:
-    seen: list[tuple[str, str | None, dict[str, object]]] = []
+    seen: list[tuple[str, str | None, str | None, dict[str, object]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = jsonlib.loads(request.content.decode())
-        seen.append((request.url.path, request.headers.get("x-trustedrouter-workspace"), body))
+        seen.append(
+            (
+                request.url.path,
+                request.headers.get("x-trustedrouter-workspace"),
+                request.headers.get("idempotency-key"),
+                body,
+            )
+        )
         if body.get("stream") is True:
             return httpx.Response(
                 200,
@@ -676,8 +829,12 @@ def test_async_responses_wrapper_and_stream() -> None:
     events = asyncio.run(run())
     assert seen[0][0] == "/v1/responses"
     assert seen[0][1] == "ws_override"
-    assert "workspace_id" not in seen[0][2]
+    assert seen[0][2] is not None
+    assert seen[0][2].startswith("tr-req-")
+    assert "workspace_id" not in seen[0][3]
     assert seen[1][1] == "ws_default"
+    assert seen[1][2] is not None
+    assert seen[1][2].startswith("tr-req-")
     assert events[0]["event"] == "response.completed"
 
 
@@ -685,11 +842,13 @@ def test_async_broadcast_destination_helpers() -> None:
     seen: list[tuple[str, str, str | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((
-            request.method,
-            request.url.path,
-            request.headers.get("x-trustedrouter-workspace"),
-        ))
+        seen.append(
+            (
+                request.method,
+                request.url.path,
+                request.headers.get("x-trustedrouter-workspace"),
+            )
+        )
         return httpx.Response(200, json={"data": {"id": "bdst_1"}})
 
     async def run() -> None:

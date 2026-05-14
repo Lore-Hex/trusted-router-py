@@ -4,6 +4,7 @@ import asyncio
 import json as jsonlib
 import platform
 import random
+import secrets
 import sys
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
@@ -40,8 +41,10 @@ AUTO_MODEL = "trustedrouter/auto"
 # for it is published.
 REGION_HOSTS: dict[str, str] = {
     "us-central1": "api.quillrouter.com",
+    "us-east4": "api-us-east4.quillrouter.com",
     "europe-west4": "api-europe-west4.quillrouter.com",
 }
+DEFAULT_FAILOVER_REGIONS = ("us-central1", "us-east4", "europe-west4")
 
 
 def region_base_url(region: str) -> str:
@@ -173,6 +176,30 @@ def _retryable(status_code: int) -> bool:
     return status_code == 429 or status_code >= 500
 
 
+def _regional_failoverable(status_code: int) -> bool:
+    return status_code in {502, 503, 504}
+
+
+def _regional_base_urls(
+    primary_base_url: str,
+    *,
+    enabled: bool,
+    failover_regions: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    urls = [primary_base_url.rstrip("/")]
+    if not enabled:
+        return urls
+    for region in failover_regions or DEFAULT_FAILOVER_REGIONS:
+        candidate = region_base_url(region).rstrip("/")
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
+def _transport_retry_error(exc: httpx.TransportError) -> InternalError:
+    return InternalError(503, f"TrustedRouter regional endpoint unavailable: {exc!s}")
+
+
 def _retry_sleep(attempt: int, *, retry_after: float | None) -> float:
     """Exponential backoff with full jitter, capped at 30 s. If the
     server gave us a Retry-After hint, honor that as the floor."""
@@ -181,6 +208,11 @@ def _retry_sleep(attempt: int, *, retry_after: float | None) -> float:
     if retry_after is not None:
         delay = max(delay, retry_after)
     return delay
+
+
+def _new_idempotency_key() -> str:
+    """Generate a stable-at-call-site key for retryable inference requests."""
+    return f"tr-req-{secrets.token_urlsafe(24)}"
 
 
 # ---- shared streaming helpers --------------------------------------------
@@ -445,6 +477,8 @@ class TrustedRouter:
         workspace_id: str | None = None,
         client: httpx.Client | None = None,
         max_retries: int = 2,
+        regional_failover: bool | None = None,
+        failover_regions: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         """Sync TrustedRouter client.
 
@@ -457,6 +491,7 @@ class TrustedRouter:
         `max_retries` controls automatic retry of 429 / 5xx responses
         with exponential backoff + jitter. Set to 0 to disable retries
         entirely (e.g. inside an outer retry loop)."""
+        explicit_endpoint = region is not None or base_url is not None
         if region is not None and base_url is not None:
             raise ValueError("pass region= OR base_url=, not both")
         if region is not None:
@@ -468,6 +503,14 @@ class TrustedRouter:
         self.region = region
         self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
+        failover_enabled = (
+            (not explicit_endpoint) if regional_failover is None else regional_failover
+        )
+        self._base_urls = _regional_base_urls(
+            self.base_url,
+            enabled=failover_enabled,
+            failover_regions=failover_regions,
+        )
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -513,17 +556,32 @@ class TrustedRouter:
         selected_api_key = api_key if api_key is not None else self.api_key
         if selected_api_key:
             merged_headers["authorization"] = f"Bearer {selected_api_key}"
-        url = f"{self.base_url}/{path.lstrip('/')}"
         kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
         if timeout is not None:
             kwargs["timeout"] = timeout
         # Retry 429 + 5xx with exponential backoff + jitter. Honors
         # Retry-After when present.
         attempt = 0
+        base_index = 0
         while True:
-            response = self._client.request(method, url, **kwargs)
+            url = f"{self._base_urls[base_index]}/{path.lstrip('/')}"
+            try:
+                response = self._client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
+                continue
             if attempt >= self.max_retries or not _retryable(response.status_code):
                 return _json_or_raise(response)
+            if (
+                _regional_failoverable(response.status_code)
+                and base_index < len(self._base_urls) - 1
+            ):
+                base_index += 1
             time.sleep(_retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers)))
             attempt += 1
 
@@ -537,6 +595,7 @@ class TrustedRouter:
         extra_headers: Mapping[str, str] | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
+        base_url: str | None = None,
     ) -> dict[str, Any]:
         # Pull our reserved kwargs out of `params` so they aren't sent
         # into the JSON body. (Defensive: callers spreading a dict
@@ -548,7 +607,7 @@ class TrustedRouter:
         body = {"model": model, "messages": messages, "stream": True, **params_dict}
         return _build_stream_request(
             "POST",
-            f"{self.base_url}/chat/completions",
+            f"{(base_url or self.base_url).rstrip('/')}/chat/completions",
             body=body,
             api_key=api_key if api_key is not None else self.api_key,
             extra_headers=extra_headers,
@@ -575,17 +634,52 @@ class TrustedRouter:
         Pass `api_key` to override the instance-level key for this single
         call. Pass `extra_headers`, `idempotency_key`, or `timeout` to
         tune the single request without recreating the client."""
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        with self._client.stream(**req) as response:
-            if response.is_error:
-                _raise_for_stream_response(response)
-            for chunk in _iter_sse_chunks(response):
-                txt = _delta_text(chunk)
-                if txt:
-                    yield txt
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            response.read()
+                            base_index += 1
+                            time.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        _raise_for_stream_response(response)
+                    for chunk in _iter_sse_chunks(response):
+                        txt = _delta_text(chunk)
+                        if txt:
+                            yield txt
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     def chat_completions_chunk_stream(
         self,
@@ -602,15 +696,50 @@ class TrustedRouter:
         ChatCompletionChunk models. Use this when you need access to
         fields beyond the text delta (e.g. `finish_reason`, `model`,
         `id`) — for instance when translating to a different SSE shape."""
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        with self._client.stream(**req) as response:
-            if response.is_error:
-                _raise_for_stream_response(response)
-            for chunk in _iter_sse_chunks(response):
-                yield ChatCompletionChunk.model_validate(chunk)
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            response.read()
+                            base_index += 1
+                            time.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        _raise_for_stream_response(response)
+                    for chunk in _iter_sse_chunks(response):
+                        yield ChatCompletionChunk.model_validate(chunk)
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     def chat_completions(
         self,
@@ -626,15 +755,49 @@ class TrustedRouter:
         """Collect the streamed response into a single typed
         ChatCompletion. Use chat_completions_stream() if you want to
         stream tokens to the user instead."""
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        with self._client.stream(**req) as response:
-            if response.is_error:
-                _raise_for_stream_response(response)
-            chunks = list(_iter_sse_chunks(response))
-        return ChatCompletion.model_validate(_collect_completion(chunks))
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            response.read()
+                            base_index += 1
+                            time.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        _raise_for_stream_response(response)
+                    chunks = list(_iter_sse_chunks(response))
+                return ChatCompletion.model_validate(_collect_completion(chunks))
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     def models(self) -> ModelList:
         return ModelList.model_validate(self.request("GET", "/models"))
@@ -709,6 +872,7 @@ class TrustedRouter:
         **params: Any,
     ) -> ResponseObject:
         """Create a stateless OpenAI Responses API request."""
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
         body = _responses_body(
             model=model,
             input=input,
@@ -724,7 +888,7 @@ class TrustedRouter:
                 headers=extra_headers,
                 api_key=api_key,
                 workspace_id=workspace_id,
-                idempotency_key=idempotency_key,
+                idempotency_key=request_idempotency_key,
                 timeout=timeout,
             )
         )
@@ -743,6 +907,7 @@ class TrustedRouter:
         **params: Any,
     ) -> Iterator[dict[str, Any]]:
         """Yield parsed Responses SSE events as dictionaries."""
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
         body = _responses_body(
             model=model,
             input=input,
@@ -750,20 +915,48 @@ class TrustedRouter:
             stream=True,
             params=params,
         )
-        req = _build_stream_request(
-            "POST",
-            f"{self.base_url}/responses",
-            body=body,
-            api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=extra_headers,
-            idempotency_key=idempotency_key,
-            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
-            timeout=timeout,
-        )
-        with self._client.stream(**req) as response:
-            if response.is_error:
-                _raise_for_stream_response(response)
-            yield from _iter_sse_events(response)
+        attempt = 0
+        base_index = 0
+        while True:
+            req = _build_stream_request(
+                "POST",
+                f"{self._base_urls[base_index]}/responses",
+                body=body,
+                api_key=api_key if api_key is not None else self.api_key,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+                timeout=timeout,
+            )
+            response_opened = False
+            try:
+                with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            response.read()
+                            base_index += 1
+                            time.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        _raise_for_stream_response(response)
+                    yield from _iter_sse_events(response)
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     def responses_raw_stream(
         self,
@@ -778,6 +971,7 @@ class TrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> Iterator[bytes]:
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
         body = _responses_body(
             model=model,
             input=input,
@@ -785,20 +979,48 @@ class TrustedRouter:
             stream=True,
             params=params,
         )
-        req = _build_stream_request(
-            "POST",
-            f"{self.base_url}/responses",
-            body=body,
-            api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=extra_headers,
-            idempotency_key=idempotency_key,
-            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
-            timeout=timeout,
-        )
-        with self._client.stream(**req) as response:
-            if response.is_error:
-                _raise_for_stream_response(response)
-            yield from response.iter_bytes()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = _build_stream_request(
+                "POST",
+                f"{self._base_urls[base_index]}/responses",
+                body=body,
+                api_key=api_key if api_key is not None else self.api_key,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+                timeout=timeout,
+            )
+            response_opened = False
+            try:
+                with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            response.read()
+                            base_index += 1
+                            time.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        _raise_for_stream_response(response)
+                    yield from response.iter_bytes()
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     def responses_input_tokens(
         self,
@@ -993,7 +1215,10 @@ class AsyncTrustedRouter:
         workspace_id: str | None = None,
         client: httpx.AsyncClient | None = None,
         max_retries: int = 2,
+        regional_failover: bool | None = None,
+        failover_regions: list[str] | tuple[str, ...] | None = None,
     ) -> None:
+        explicit_endpoint = region is not None or base_url is not None
         if region is not None and base_url is not None:
             raise ValueError("pass region= OR base_url=, not both")
         if region is not None:
@@ -1005,6 +1230,14 @@ class AsyncTrustedRouter:
         self.region = region
         self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
+        failover_enabled = (
+            (not explicit_endpoint) if regional_failover is None else regional_failover
+        )
+        self._base_urls = _regional_base_urls(
+            self.base_url,
+            enabled=failover_enabled,
+            failover_regions=failover_regions,
+        )
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -1053,15 +1286,30 @@ class AsyncTrustedRouter:
         selected_api_key = api_key if api_key is not None else self.api_key
         if selected_api_key:
             merged_headers["authorization"] = f"Bearer {selected_api_key}"
-        url = f"{self.base_url}/{path.lstrip('/')}"
         kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
         if timeout is not None:
             kwargs["timeout"] = timeout
         attempt = 0
+        base_index = 0
         while True:
-            response = await self._client.request(method, url, **kwargs)
+            url = f"{self._base_urls[base_index]}/{path.lstrip('/')}"
+            try:
+                response = await self._client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
+                continue
             if attempt >= self.max_retries or not _retryable(response.status_code):
                 return _json_or_raise(response)
+            if (
+                _regional_failoverable(response.status_code)
+                and base_index < len(self._base_urls) - 1
+            ):
+                base_index += 1
             await asyncio.sleep(
                 _retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers))
             )
@@ -1077,6 +1325,7 @@ class AsyncTrustedRouter:
         extra_headers: Mapping[str, str] | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
+        base_url: str | None = None,
     ) -> dict[str, Any]:
         # Pull our reserved kwargs out of `params` so they aren't sent
         # into the JSON body. (Defensive: callers spreading a dict
@@ -1088,7 +1337,7 @@ class AsyncTrustedRouter:
         body = {"model": model, "messages": messages, "stream": True, **params_dict}
         return _build_stream_request(
             "POST",
-            f"{self.base_url}/chat/completions",
+            f"{(base_url or self.base_url).rstrip('/')}/chat/completions",
             body=body,
             api_key=api_key if api_key is not None else self.api_key,
             extra_headers=extra_headers,
@@ -1110,17 +1359,52 @@ class AsyncTrustedRouter:
     ) -> AsyncIterator[str]:
         """Yield assistant-message text deltas as they arrive. Pass
         `api_key` to override the instance key for this single call."""
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        async with self._client.stream(**req) as response:
-            if response.is_error:
-                await _araise_for_stream_response(response)
-            async for chunk in _aiter_sse_chunks(response):
-                txt = _delta_text(chunk)
-                if txt:
-                    yield txt
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                async with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            await response.aread()
+                            base_index += 1
+                            await asyncio.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        await _araise_for_stream_response(response)
+                    async for chunk in _aiter_sse_chunks(response):
+                        txt = _delta_text(chunk)
+                        if txt:
+                            yield txt
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     async def chat_completions_chunk_stream(
         self,
@@ -1135,15 +1419,50 @@ class AsyncTrustedRouter:
     ) -> AsyncIterator[ChatCompletionChunk]:
         """Yield parsed OpenAI chat.completion.chunk frames as typed
         ChatCompletionChunk models."""
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        async with self._client.stream(**req) as response:
-            if response.is_error:
-                await _araise_for_stream_response(response)
-            async for chunk in _aiter_sse_chunks(response):
-                yield ChatCompletionChunk.model_validate(chunk)
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                async with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            await response.aread()
+                            base_index += 1
+                            await asyncio.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        await _araise_for_stream_response(response)
+                    async for chunk in _aiter_sse_chunks(response):
+                        yield ChatCompletionChunk.model_validate(chunk)
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     async def chat_completions_raw_stream(
         self,
@@ -1159,15 +1478,50 @@ class AsyncTrustedRouter:
         """Pass-through SSE bytes. For relays that need to forward the
         raw `data: {...}\\n\\n` framing without decoding (e.g. an HTTP
         proxy in front of the gateway)."""
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        async with self._client.stream(**req) as response:
-            if response.is_error:
-                await _araise_for_stream_response(response)
-            async for chunk in response.aiter_bytes():
-                yield chunk
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                async with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            await response.aread()
+                            base_index += 1
+                            await asyncio.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        await _araise_for_stream_response(response)
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     async def chat_completions(
         self,
@@ -1180,17 +1534,51 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> ChatCompletion:
-        req = self._build_chat_request(
-            model=model, messages=messages, api_key=api_key, params=params,
-            extra_headers=extra_headers, idempotency_key=idempotency_key, timeout=timeout,
-        )
-        chunks: list[dict[str, Any]] = []
-        async with self._client.stream(**req) as response:
-            if response.is_error:
-                await _araise_for_stream_response(response)
-            async for chunk in _aiter_sse_chunks(response):
-                chunks.append(chunk)
-        return ChatCompletion.model_validate(_collect_completion(chunks))
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            chunks: list[dict[str, Any]] = []
+            response_opened = False
+            try:
+                async with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            await response.aread()
+                            base_index += 1
+                            await asyncio.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        await _araise_for_stream_response(response)
+                    async for chunk in _aiter_sse_chunks(response):
+                        chunks.append(chunk)
+                return ChatCompletion.model_validate(_collect_completion(chunks))
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     async def models(self) -> ModelList:
         return ModelList.model_validate(await self.request("GET", "/models"))
@@ -1240,9 +1628,7 @@ class AsyncTrustedRouter:
             "max_tokens": max_tokens,
             **params,
         }
-        return MessagesResponse.model_validate(
-            await self.request("POST", "/messages", json=body)
-        )
+        return MessagesResponse.model_validate(await self.request("POST", "/messages", json=body))
 
     async def responses(
         self,
@@ -1257,6 +1643,7 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> ResponseObject:
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
         body = _responses_body(
             model=model,
             input=input,
@@ -1272,7 +1659,7 @@ class AsyncTrustedRouter:
                 headers=extra_headers,
                 api_key=api_key,
                 workspace_id=workspace_id,
-                idempotency_key=idempotency_key,
+                idempotency_key=request_idempotency_key,
                 timeout=timeout,
             )
         )
@@ -1290,6 +1677,7 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> AsyncIterator[dict[str, Any]]:
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
         body = _responses_body(
             model=model,
             input=input,
@@ -1297,21 +1685,49 @@ class AsyncTrustedRouter:
             stream=True,
             params=params,
         )
-        req = _build_stream_request(
-            "POST",
-            f"{self.base_url}/responses",
-            body=body,
-            api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=extra_headers,
-            idempotency_key=idempotency_key,
-            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
-            timeout=timeout,
-        )
-        async with self._client.stream(**req) as response:
-            if response.is_error:
-                await _araise_for_stream_response(response)
-            async for event in _aiter_sse_events(response):
-                yield event
+        attempt = 0
+        base_index = 0
+        while True:
+            req = _build_stream_request(
+                "POST",
+                f"{self._base_urls[base_index]}/responses",
+                body=body,
+                api_key=api_key if api_key is not None else self.api_key,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+                timeout=timeout,
+            )
+            response_opened = False
+            try:
+                async with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            await response.aread()
+                            base_index += 1
+                            await asyncio.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        await _araise_for_stream_response(response)
+                    async for event in _aiter_sse_events(response):
+                        yield event
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     async def responses_raw_stream(
         self,
@@ -1326,6 +1742,7 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> AsyncIterator[bytes]:
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
         body = _responses_body(
             model=model,
             input=input,
@@ -1333,21 +1750,49 @@ class AsyncTrustedRouter:
             stream=True,
             params=params,
         )
-        req = _build_stream_request(
-            "POST",
-            f"{self.base_url}/responses",
-            body=body,
-            api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=extra_headers,
-            idempotency_key=idempotency_key,
-            workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
-            timeout=timeout,
-        )
-        async with self._client.stream(**req) as response:
-            if response.is_error:
-                await _araise_for_stream_response(response)
-            async for chunk in response.aiter_bytes():
-                yield chunk
+        attempt = 0
+        base_index = 0
+        while True:
+            req = _build_stream_request(
+                "POST",
+                f"{self._base_urls[base_index]}/responses",
+                body=body,
+                api_key=api_key if api_key is not None else self.api_key,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
+                timeout=timeout,
+            )
+            response_opened = False
+            try:
+                async with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if (
+                            attempt < self.max_retries
+                            and _regional_failoverable(response.status_code)
+                            and base_index < len(self._base_urls) - 1
+                        ):
+                            await response.aread()
+                            base_index += 1
+                            await asyncio.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        await _araise_for_stream_response(response)
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
 
     async def responses_input_tokens(
         self,

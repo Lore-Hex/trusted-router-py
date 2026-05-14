@@ -39,6 +39,7 @@ from trustedrouter.client import (
     DEFAULT_TRUST_RELEASE_URL,
     fetch_trust_release,
 )
+from trustedrouter.models import TrustRelease
 
 GCP_ISSUER = "https://confidentialcomputing.googleapis.com"
 GCP_JWKS_URI = (
@@ -93,7 +94,7 @@ class GatewayAttestation:
 
 
 def policy_from_trust_release(
-    release: Mapping[str, Any] | None = None,
+    release: Mapping[str, Any] | TrustRelease | None = None,
     *,
     audience: str = "quill-cloud",
     cert_sha256: str | None = None,
@@ -102,13 +103,18 @@ def policy_from_trust_release(
     """Build a policy by reading the published trust release. If
     `release` isn't provided, fetches it from `trust_release_url`. The
     audience defaults to "quill-cloud" — the gateway hard-codes this."""
-    if release is None:
-        release = fetch_trust_release(trust_release_url)
+    release_obj = release if release is not None else fetch_trust_release(trust_release_url)
+    if isinstance(release_obj, TrustRelease):
+        image_digest = release_obj.image_digest
+        image_reference = release_obj.image_reference
+    else:
+        image_digest = str(release_obj.get("image_digest") or "") or None
+        image_reference = str(release_obj.get("image_reference") or "") or None
     return AttestationPolicy(
         gcp_audience=audience,
         expected_cert_sha256=cert_sha256,
-        expected_image_digest=str(release.get("image_digest") or "") or None,
-        expected_image_reference=str(release.get("image_reference") or "") or None,
+        expected_image_digest=image_digest,
+        expected_image_reference=image_reference,
     )
 
 

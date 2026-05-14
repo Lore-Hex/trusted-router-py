@@ -1,5 +1,12 @@
 # TrustedRouter Python SDK
 
+[![PyPI version](https://img.shields.io/pypi/v/trusted-router-py?logo=pypi)](https://pypi.org/project/trusted-router-py/)
+[![Python versions](https://img.shields.io/pypi/pyversions/trusted-router-py?logo=python)](https://pypi.org/project/trusted-router-py/)
+[![CI](https://github.com/Lore-Hex/trusted-router-py/actions/workflows/ci.yml/badge.svg)](https://github.com/Lore-Hex/trusted-router-py/actions/workflows/ci.yml)
+[![Typed with Pydantic](https://img.shields.io/badge/types-pydantic-e92063)](https://pypi.org/project/trusted-router-py/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Verifiable trust](https://img.shields.io/badge/trust-attested-16a34a)](https://trust.trustedrouter.com)
+
 OpenAI-compatible Python client for [TrustedRouter](https://trustedrouter.com) —
 the hosted, attested LLM router that lets you point one OpenAI-shaped client
 at every provider (Anthropic, OpenAI, Google Vertex, Gemini, DeepSeek,

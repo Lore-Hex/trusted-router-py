@@ -144,11 +144,11 @@ def test_module_level_fetch_trust_release_uses_its_own_client() -> None:
         captured["called"] = True
         return real_client(*args, **kwargs)
 
-    mod.httpx.Client = factory  # type: ignore[assignment]
+    mod.httpx.Client = factory  # type: ignore[assignment,misc]
     try:
         out = fetch_trust_release(url="https://t.example/r.json")
     finally:
-        mod.httpx.Client = real_client  # type: ignore[assignment]
+        mod.httpx.Client = real_client  # type: ignore[assignment,misc]
 
     assert out.image_digest == "sha256:zzz"
     assert captured.get("called") is True
