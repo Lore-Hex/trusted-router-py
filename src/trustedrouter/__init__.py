@@ -57,6 +57,19 @@ from trustedrouter.models import (
     TrustReleaseDataPolicy,
     TrustReleaseTLS,
 )
+from trustedrouter.oauth import (
+    OAuthAuthorization,
+    OAuthToken,
+    PKCEPair,
+    create_oauth_authorization,
+    create_pkce_pair,
+    exchange_oauth_key,
+    exchange_oauth_key_async,
+    fetch_userinfo,
+    fetch_userinfo_async,
+    oauth_authorize_url,
+    random_oauth_state,
+)
 
 __version__ = "0.3.0"
 
@@ -94,6 +107,9 @@ __all__ = [
     "ModelList",
     "ModelPricing",
     "NotFoundError",
+    "OAuthAuthorization",
+    "OAuthToken",
+    "PKCEPair",
     "PermissionDeniedError",
     "ProviderInfo",
     "ProviderList",
@@ -112,7 +128,15 @@ __all__ = [
     "TrustedRouter",
     "TrustedRouterError",
     "__version__",
+    "create_oauth_authorization",
+    "create_pkce_pair",
+    "exchange_oauth_key",
+    "exchange_oauth_key_async",
     "fetch_trust_release",
+    "fetch_userinfo",
+    "fetch_userinfo_async",
+    "oauth_authorize_url",
+    "random_oauth_state",
     "region_base_url",
     "verify_gateway_attestation",
 ]
