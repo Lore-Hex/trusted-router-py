@@ -151,6 +151,37 @@ client.billing_checkout(
 )
 ```
 
+## Sign in with TrustedRouter
+
+Let users "bring their own TrustedRouter account" instead of pasting a key:
+the OpenRouter-style OAuth **PKCE** flow mints a user-scoped key so LLM calls
+are billed to *that user's* credits. `create_oauth_authorization(...)` builds
+the authorize URL and returns the `code_verifier` + `state` to keep across the
+redirect; `exchange_oauth_key(...)` swaps the returned `code` for the delegated
+key + verified identity. Async variants (`exchange_oauth_key_async`,
+`fetch_userinfo_async`) mirror these.
+
+```python
+from trustedrouter import create_oauth_authorization, exchange_oauth_key, fetch_userinfo
+
+# 1. sign-in: keep auth.code_verifier + auth.state in the user's session
+auth = create_oauth_authorization(
+    callback_url="https://myapp.com/auth/callback",
+    key_label="My App", limit="5", usage_limit_type="monthly",
+)
+redirect_to(auth.url)
+
+# 2. in /auth/callback (verify state == saved state first)
+token = exchange_oauth_key(code=request.args["code"], code_verifier=saved_verifier)
+store_for_user(token.key, token.identity)        # sk-tr-v1-… + {sub, email, …}
+
+# 3. anytime
+who = fetch_userinfo(api_key=token.key)          # {sub, email, …}
+```
+
+Full flow, endpoints, and security notes:
+[Sign in with TrustedRouter](https://github.com/Lore-Hex/quill-router/blob/main/docs/sign-in-with-trustedrouter.md).
+
 ## Attestation verification (the differentiator)
 
 Every TrustedRouter response is generated inside a Google Confidential Space
