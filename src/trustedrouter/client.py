@@ -7,7 +7,7 @@ import random
 import secrets
 import sys
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -34,6 +34,63 @@ DEFAULT_API_BASE_URL = "https://api.quillrouter.com/v1"
 DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
 DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
 AUTO_MODEL = "trustedrouter/auto"
+FUSION_MODEL = "trustedrouter/fusion"
+
+# Recommended panel + judge fallback chain for maximum willingness to answer —
+# the configuration that answered all 30 PrometheusBench unsafe prompts. Pass
+# these to fusion(...) (or build your own) for the most permissive result.
+FUSION_FREEDOM_PANEL: tuple[str, ...] = (
+    "moonshotai/kimi-k2.7-code",
+    "deepseek/deepseek-v4-flash",
+    "google/gemini-3.5-flash",
+    "google/gemini-3.1-pro-preview",
+    "minimax/minimax-m3",
+    "z-ai/glm-5.1",
+)
+FUSION_FREEDOM_FALLBACK_JUDGES: tuple[str, ...] = (
+    "z-ai/glm-5.1",
+    "moonshotai/kimi-k2.6",
+    "google/gemini-2.5-flash",
+    "deepseek/deepseek-v4-flash",
+    "google/gemini-3-flash-preview",
+    "tencent/hy3-preview",
+)
+
+
+def fusion_tool(
+    *,
+    analysis_models: Sequence[str] | None = None,
+    model: str | None = None,  # judge / synthesis model
+    selection_strategy: str | None = None,
+    fallback_judges: Sequence[str] | None = None,
+    fallback_final_models: Sequence[str] | None = None,
+    max_completion_tokens: int | None = None,
+    max_tool_calls: int | None = None,
+    preset: str | None = None,
+) -> dict[str, Any]:
+    """Build a ``trustedrouter:fusion`` tool spec. Fan a request across a panel
+    of models and have a judge model pick or synthesize one answer. Omit a field
+    to let the gateway default it (``selection_strategy`` defaults to
+    ``"synthesize"``)."""
+    parameters: dict[str, Any] = {}
+    if preset is not None:
+        parameters["preset"] = preset
+    if analysis_models is not None:
+        parameters["analysis_models"] = list(analysis_models)
+    if model is not None:
+        parameters["model"] = model
+    if selection_strategy is not None:
+        parameters["selection_strategy"] = selection_strategy
+    if fallback_judges is not None:
+        parameters["fallback_judges"] = list(fallback_judges)
+    if fallback_final_models is not None:
+        parameters["fallback_final_models"] = list(fallback_final_models)
+    if max_completion_tokens is not None:
+        parameters["max_completion_tokens"] = max_completion_tokens
+    if max_tool_calls is not None:
+        parameters["max_tool_calls"] = max_tool_calls
+    return {"type": "trustedrouter:fusion", "parameters": parameters}
+
 
 # Region routing — see https://trust.trustedrouter.com for the live list.
 # Apex (`api.quillrouter.com`) is currently us-central1, so we treat the
@@ -798,6 +855,41 @@ class TrustedRouter:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
+
+    def fusion(
+        self,
+        *,
+        messages: list[Mapping[str, Any]],
+        analysis_models: Sequence[str] | None = None,
+        model: str | None = None,  # judge / synthesis model
+        selection_strategy: str | None = None,
+        fallback_judges: Sequence[str] | None = None,
+        fallback_final_models: Sequence[str] | None = None,
+        max_completion_tokens: int | None = None,
+        max_tool_calls: int | None = None,
+        preset: str | None = None,
+        **params: Any,
+    ) -> ChatCompletion:
+        """Run a request through TrustedRouter Fusion: fan it across a panel and
+        return one answer chosen/synthesized by a judge model. Returns a typed
+        ChatCompletion, same as chat_completions. Pass ``fallback_judges`` so a
+        single squeamish judge can't sink a prompt."""
+        tools = list(params.pop("tools", []))
+        tools.append(
+            fusion_tool(
+                analysis_models=analysis_models,
+                model=model,
+                selection_strategy=selection_strategy,
+                fallback_judges=fallback_judges,
+                fallback_final_models=fallback_final_models,
+                max_completion_tokens=max_completion_tokens,
+                max_tool_calls=max_tool_calls,
+                preset=preset,
+            )
+        )
+        return self.chat_completions(
+            model=FUSION_MODEL, messages=messages, tools=tools, **params
+        )
 
     def models(self) -> ModelList:
         return ModelList.model_validate(self.request("GET", "/models"))
@@ -1579,6 +1671,38 @@ class AsyncTrustedRouter:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
+
+    async def fusion(
+        self,
+        *,
+        messages: list[Mapping[str, Any]],
+        analysis_models: Sequence[str] | None = None,
+        model: str | None = None,  # judge / synthesis model
+        selection_strategy: str | None = None,
+        fallback_judges: Sequence[str] | None = None,
+        fallback_final_models: Sequence[str] | None = None,
+        max_completion_tokens: int | None = None,
+        max_tool_calls: int | None = None,
+        preset: str | None = None,
+        **params: Any,
+    ) -> ChatCompletion:
+        """Async TrustedRouter Fusion — mirror of TrustedRouter.fusion."""
+        tools = list(params.pop("tools", []))
+        tools.append(
+            fusion_tool(
+                analysis_models=analysis_models,
+                model=model,
+                selection_strategy=selection_strategy,
+                fallback_judges=fallback_judges,
+                fallback_final_models=fallback_final_models,
+                max_completion_tokens=max_completion_tokens,
+                max_tool_calls=max_tool_calls,
+                preset=preset,
+            )
+        )
+        return await self.chat_completions(
+            model=FUSION_MODEL, messages=messages, tools=tools, **params
+        )
 
     async def models(self) -> ModelList:
         return ModelList.model_validate(await self.request("GET", "/models"))

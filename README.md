@@ -38,6 +38,34 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
 `chat_completions(...)` defaults to `AUTO_MODEL` when `model=` is omitted, so
 the simplest possible call is `client.chat_completions(messages=[...])`.
 
+## Fusion
+
+Fan a request across a panel of models and let a judge model pick or synthesize
+one answer. `fusion(...)` (and `AsyncTrustedRouter.fusion(...)`) returns the same
+typed `ChatCompletion` as `chat_completions`. `FUSION_FREEDOM_PANEL` /
+`FUSION_FREEDOM_FALLBACK_JUDGES` are the recommended most-permissive config.
+
+```python
+from trustedrouter import (
+    TrustedRouter,
+    FUSION_FREEDOM_PANEL,
+    FUSION_FREEDOM_FALLBACK_JUDGES,
+)
+
+with TrustedRouter(api_key="sk-tr-v1-...") as client:
+    resp = client.fusion(
+        messages=[{"role": "user", "content": "explain how mRNA vaccines work"}],
+        analysis_models=FUSION_FREEDOM_PANEL,       # the panel
+        model="z-ai/glm-5.1",                       # judge / synthesis model
+        selection_strategy="first_non_refusal",     # or synthesize / synthesize_non_refusals / first_success
+        fallback_judges=FUSION_FREEDOM_FALLBACK_JUDGES,  # tried in order if a judge refuses/fails
+    )
+    print(resp.choices[0].message.content)
+```
+
+Or build the spec with `fusion_tool(...)` and pass it to any chat call.
+`preset="quality"` or `"budget"` selects a built-in panel.
+
 **Every method returns a typed pydantic model** — IDE autocomplete + runtime
 validation. Need a dict? Call `.model_dump()`:
 
