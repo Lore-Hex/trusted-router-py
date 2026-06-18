@@ -443,17 +443,53 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         }
     text_parts: list[str] = []
     finish_reason: str | None = None
+    role = "assistant"
+    usage: dict[str, Any] | None = None
+    # tool-call deltas arrive fragmented and keyed by `index`; the arguments
+    # stream in pieces and must be concatenated in arrival order.
+    tool_calls: dict[int, dict[str, Any]] = {}
     for c in chunks:
+        chunk_usage = c.get("usage")
+        if isinstance(chunk_usage, dict):
+            usage = chunk_usage
         choices = c.get("choices") or []
         if not choices:
             continue
-        delta = choices[0].get("delta") or {}
+        choice0 = choices[0]
+        delta = choice0.get("delta") or {}
+        if isinstance(delta.get("role"), str):
+            role = delta["role"]
         if isinstance(delta.get("content"), str):
             text_parts.append(delta["content"])
-        if choices[0].get("finish_reason"):
-            finish_reason = choices[0]["finish_reason"]
+        for tc in delta.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = tc.get("index", 0)
+            slot = tool_calls.setdefault(
+                idx, {"index": idx, "type": "function", "function": {"name": "", "arguments": ""}}
+            )
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            if tc.get("type"):
+                slot["type"] = tc["type"]
+            fn = tc.get("function")
+            if isinstance(fn, dict):
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if isinstance(fn.get("arguments"), str):
+                    slot["function"]["arguments"] += fn["arguments"]
+        if choice0.get("finish_reason"):
+            finish_reason = choice0["finish_reason"]
     last = chunks[-1]
-    return {
+    content = "".join(text_parts)
+    # OpenAI sets content to null when a turn is only tool calls.
+    message: dict[str, Any] = {
+        "role": role,
+        "content": content if content else (None if tool_calls else ""),
+    }
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    result: dict[str, Any] = {
         "id": last.get("id", ""),
         "object": "chat.completion",
         "created": last.get("created", 0),
@@ -461,11 +497,26 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": "".join(text_parts)},
+                "message": message,
                 "finish_reason": finish_reason or "stop",
             }
         ],
     }
+    if usage is not None:
+        result["usage"] = usage
+    return result
+
+
+def _with_usage(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Ask the gateway to emit a trailing usage frame so a *collected*
+    completion carries token counts. The streamed transport omits usage
+    unless ``stream_options.include_usage`` is set; default it on (callers
+    can still override by passing their own ``stream_options``)."""
+    merged = dict(params)
+    stream_options = dict(merged.get("stream_options") or {})
+    stream_options.setdefault("include_usage", True)
+    merged["stream_options"] = stream_options
+    return merged
 
 
 def _responses_body(
@@ -813,6 +864,7 @@ class TrustedRouter:
         ChatCompletion. Use chat_completions_stream() if you want to
         stream tokens to the user instead."""
         request_idempotency_key = idempotency_key or _new_idempotency_key()
+        params = _with_usage(params)
         attempt = 0
         base_index = 0
         while True:
@@ -1627,6 +1679,7 @@ class AsyncTrustedRouter:
         **params: Any,
     ) -> ChatCompletion:
         request_idempotency_key = idempotency_key or _new_idempotency_key()
+        params = _with_usage(params)
         attempt = 0
         base_index = 0
         while True:

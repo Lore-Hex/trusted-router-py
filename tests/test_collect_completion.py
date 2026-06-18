@@ -88,3 +88,77 @@ def test_uses_last_seen_finish_reason() -> None:
     ]
     result = _collect_completion(chunks)
     assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_aggregates_streamed_tool_calls() -> None:
+    """A tool-calling turn streams the function name once and the JSON
+    arguments in fragments, keyed by index. We must reassemble each call
+    with its id/name and the concatenated arguments — without this the
+    whole tool-using/agentic path silently loses every function call."""
+    chunks: list[dict[str, Any]] = [
+        {"id": "x", "model": "m", "choices": [{"delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_a", "type": "function",
+             "function": {"name": "web_search", "arguments": ""}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"query":'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": ' "taiwan"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+    result = _collect_completion(chunks)
+    msg = result["choices"][0]["message"]
+    assert msg["content"] is None  # a tool-call-only turn has null content
+    assert result["choices"][0]["finish_reason"] == "tool_calls"
+    calls = msg["tool_calls"]
+    assert len(calls) == 1
+    assert calls[0]["id"] == "call_a"
+    assert calls[0]["type"] == "function"
+    assert calls[0]["function"]["name"] == "web_search"
+    assert calls[0]["function"]["arguments"] == '{"query": "taiwan"}'
+
+
+def test_aggregates_parallel_tool_calls_by_index() -> None:
+    """Parallel tool calls arrive interleaved under different indexes and
+    must stay separate, ordered by index."""
+    chunks: list[dict[str, Any]] = [
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "c0", "function": {"name": "a", "arguments": "{}"}},
+            {"index": 1, "id": "c1", "function": {"name": "b", "arguments": ""}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [
+            {"index": 1, "function": {"arguments": "{}"}}]}, "finish_reason": "tool_calls"}]},
+    ]
+    calls = _collect_completion(chunks)["choices"][0]["message"]["tool_calls"]
+    assert [c["function"]["name"] for c in calls] == ["a", "b"]
+    assert calls[1]["function"]["arguments"] == "{}"
+
+
+def test_captures_trailing_usage_frame() -> None:
+    """With stream_options.include_usage the gateway emits a final frame
+    carrying token usage and an empty choices array. We must surface it on
+    the collected completion (it was dropped entirely before)."""
+    chunks: list[dict[str, Any]] = [
+        {"id": "u", "model": "m", "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]},
+        {"id": "u", "model": "m", "choices": [],
+         "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}},
+    ]
+    result = _collect_completion(chunks)
+    assert result["choices"][0]["message"]["content"] == "hi"
+    assert result["usage"] == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
+
+
+def test_no_usage_frame_means_no_usage_key() -> None:
+    """When no usage is streamed, omit the key rather than inventing zeros."""
+    result = _collect_completion(
+        [{"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}]
+    )
+    assert "usage" not in result
+
+
+def test_plain_text_turn_still_has_no_tool_calls_key() -> None:
+    """Regression guard: an ordinary text answer must not grow a spurious
+    empty tool_calls list."""
+    result = _collect_completion(
+        [{"choices": [{"delta": {"content": "hello"}, "finish_reason": "stop"}]}]
+    )
+    assert "tool_calls" not in result["choices"][0]["message"]
+    assert result["choices"][0]["message"]["content"] == "hello"
