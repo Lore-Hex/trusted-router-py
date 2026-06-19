@@ -9,6 +9,8 @@ import httpx
 import pytest
 
 from trustedrouter import (
+    DEFAULT_FUSION_TIMEOUT_SECONDS,
+    FUSION_FREEDOM_FALLBACK_FINALS,
     FUSION_FREEDOM_FALLBACK_JUDGES,
     FUSION_FREEDOM_PANEL,
     FUSION_MODEL,
@@ -22,6 +24,14 @@ _SSE = (
     b'"finish_reason":"stop"}]}\n\n'
     b"data: [DONE]\n\n"
 )
+
+
+def _read_timeout(request: httpx.Request) -> float:
+    timeout = request.extensions.get("timeout")
+    assert isinstance(timeout, dict)
+    read_timeout = timeout.get("read")
+    assert isinstance(read_timeout, float | int)
+    return float(read_timeout)
 
 
 def test_fusion_tool_only_sets_provided_fields() -> None:
@@ -78,6 +88,7 @@ def test_sync_fusion_posts_fusion_model_with_tool() -> None:
         model="~zai/glm-latest",
         selection_strategy="first_non_refusal",
         fallback_judges=FUSION_FREEDOM_FALLBACK_JUDGES,
+        fallback_final_models=FUSION_FREEDOM_FALLBACK_FINALS,
         max_completion_tokens=2048,
         max_tokens=512,
     )
@@ -90,7 +101,48 @@ def test_sync_fusion_posts_fusion_model_with_tool() -> None:
     assert params["model"] == "~zai/glm-latest"
     assert params["selection_strategy"] == "first_non_refusal"
     assert params["fallback_judges"] == list(FUSION_FREEDOM_FALLBACK_JUDGES)
+    assert params["fallback_final_models"] == list(FUSION_FREEDOM_FALLBACK_FINALS)
     assert resp.choices[0].message.content == "ok"
+    sdk.close()
+
+
+def test_sync_fusion_uses_long_default_timeout_even_with_external_client() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["read_timeout"] = _read_timeout(request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE
+        )
+
+    sdk = TrustedRouter(
+        api_key="sk-tr-sync",
+        client=httpx.Client(timeout=5.0, transport=httpx.MockTransport(handler)),
+    )
+
+    sdk.fusion(messages=[{"role": "user", "content": "hi"}])
+
+    assert seen["read_timeout"] == DEFAULT_FUSION_TIMEOUT_SECONDS
+    sdk.close()
+
+
+def test_sync_fusion_allows_explicit_timeout_override() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["read_timeout"] = _read_timeout(request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE
+        )
+
+    sdk = TrustedRouter(
+        api_key="sk-tr-sync",
+        client=httpx.Client(timeout=5.0, transport=httpx.MockTransport(handler)),
+    )
+
+    sdk.fusion(messages=[{"role": "user", "content": "hi"}], timeout=42.0)
+
+    assert seen["read_timeout"] == 42.0
     sdk.close()
 
 
@@ -144,4 +196,25 @@ async def test_async_fusion_posts_fusion_model_with_tool() -> None:
     assert seen["model"] == FUSION_MODEL
     assert seen["tools"][0]["parameters"]["model"] == "~zai/glm-latest"
     assert resp.choices[0].message.content == "ok"
+    await sdk.aclose()
+
+
+@pytest.mark.asyncio
+async def test_async_fusion_uses_long_default_timeout_even_with_external_client() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["read_timeout"] = _read_timeout(request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE
+        )
+
+    sdk = AsyncTrustedRouter(
+        api_key="sk-tr-async",
+        client=httpx.AsyncClient(timeout=5.0, transport=httpx.MockTransport(handler)),
+    )
+
+    await sdk.fusion(messages=[{"role": "user", "content": "hi"}])
+
+    assert seen["read_timeout"] == DEFAULT_FUSION_TIMEOUT_SECONDS
     await sdk.aclose()

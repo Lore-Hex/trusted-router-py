@@ -33,6 +33,8 @@ from trustedrouter.models import (
 DEFAULT_API_BASE_URL = "https://api.quillrouter.com/v1"
 DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
 DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_FUSION_TIMEOUT_SECONDS = 600.0
 AUTO_MODEL = "trustedrouter/auto"
 FUSION_MODEL = "trustedrouter/fusion"
 
@@ -47,6 +49,13 @@ FUSION_FREEDOM_PANEL: tuple[str, ...] = (
     "deepseek/deepseek-v4-flash",
 )
 FUSION_FREEDOM_FALLBACK_JUDGES: tuple[str, ...] = (
+    "minimax/minimax-m3",
+    "~zai/glm-latest",
+    "~kimi/latest",
+    "deepseek/deepseek-v4-flash",
+    "google/gemma-4-31b-it",
+)
+FUSION_FREEDOM_FALLBACK_FINALS: tuple[str, ...] = (
     "minimax/minimax-m3",
     "~zai/glm-latest",
     "~kimi/latest",
@@ -578,7 +587,7 @@ class TrustedRouter:
         *,
         base_url: str | None = None,
         region: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         headers: Mapping[str, str] | None = None,
         workspace_id: str | None = None,
         client: httpx.Client | None = None,
@@ -924,6 +933,7 @@ class TrustedRouter:
         return one answer chosen/synthesized by a judge model. Returns a typed
         ChatCompletion, same as chat_completions. Pass ``fallback_judges`` so a
         single squeamish judge can't sink a prompt."""
+        params.setdefault("timeout", DEFAULT_FUSION_TIMEOUT_SECONDS)
         tools = list(params.pop("tools", []))
         tools.append(
             fusion_tool(
@@ -1351,7 +1361,7 @@ class AsyncTrustedRouter:
         *,
         base_url: str | None = None,
         region: str | None = None,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         headers: Mapping[str, str] | None = None,
         verify: bool | str = True,
         workspace_id: str | None = None,
@@ -1738,6 +1748,7 @@ class AsyncTrustedRouter:
         **params: Any,
     ) -> ChatCompletion:
         """Async TrustedRouter Fusion — mirror of TrustedRouter.fusion."""
+        params.setdefault("timeout", DEFAULT_FUSION_TIMEOUT_SECONDS)
         tools = list(params.pop("tools", []))
         tools.append(
             fusion_tool(

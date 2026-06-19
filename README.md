@@ -42,12 +42,14 @@ the simplest possible call is `client.chat_completions(messages=[...])`.
 
 Fan a request across a panel of models and let a judge model pick or synthesize
 one answer. `fusion(...)` (and `AsyncTrustedRouter.fusion(...)`) returns the same
-typed `ChatCompletion` as `chat_completions`. `FUSION_FREEDOM_PANEL` /
-`FUSION_FREEDOM_FALLBACK_JUDGES` are the recommended most-permissive config.
+typed `ChatCompletion` as `chat_completions`. `FUSION_FREEDOM_PANEL`,
+`FUSION_FREEDOM_FALLBACK_JUDGES`, and `FUSION_FREEDOM_FALLBACK_FINALS`
+are the recommended most-permissive config.
 
 ```python
 from trustedrouter import (
     TrustedRouter,
+    FUSION_FREEDOM_FALLBACK_FINALS,
     FUSION_FREEDOM_PANEL,
     FUSION_FREEDOM_FALLBACK_JUDGES,
 )
@@ -58,6 +60,9 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
         analysis_models=FUSION_FREEDOM_PANEL,       # the panel
         # omit selection_strategy to use synthesize_non_refusals
         fallback_judges=FUSION_FREEDOM_FALLBACK_JUDGES,  # tried in order if a judge refuses/fails
+        fallback_final_models=FUSION_FREEDOM_FALLBACK_FINALS,  # tried in order for synthesis
+        max_completion_tokens=800,
+        timeout=600,
     )
     print(resp.choices[0].message.content)
 ```

@@ -6,8 +6,11 @@ from trustedrouter.attestation import (
 from trustedrouter.client import (
     AUTO_MODEL,
     DEFAULT_API_BASE_URL,
+    DEFAULT_FUSION_TIMEOUT_SECONDS,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_STATUS_URL,
     DEFAULT_TRUST_RELEASE_URL,
+    FUSION_FREEDOM_FALLBACK_FINALS,
     FUSION_FREEDOM_FALLBACK_JUDGES,
     FUSION_FREEDOM_PANEL,
     FUSION_MODEL,
@@ -75,7 +78,7 @@ from trustedrouter.oauth import (
     random_oauth_state,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 __all__ = [
     "ActivityEvent",
@@ -96,11 +99,14 @@ __all__ = [
     "CheckoutSession",
     "CreditsBalance",
     "DEFAULT_API_BASE_URL",
+    "DEFAULT_FUSION_TIMEOUT_SECONDS",
+    "DEFAULT_REQUEST_TIMEOUT_SECONDS",
     "DEFAULT_STATUS_URL",
     "DEFAULT_TRUST_RELEASE_URL",
     "Embedding",
     "EmbeddingResponse",
     "EndpointNotSupportedError",
+    "FUSION_FREEDOM_FALLBACK_FINALS",
     "FUSION_FREEDOM_FALLBACK_JUDGES",
     "FUSION_FREEDOM_PANEL",
     "FUSION_MODEL",
