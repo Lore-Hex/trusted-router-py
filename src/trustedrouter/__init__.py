@@ -75,7 +75,7 @@ from trustedrouter.oauth import (
     random_oauth_state,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "ActivityEvent",

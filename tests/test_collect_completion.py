@@ -137,9 +137,17 @@ def test_captures_trailing_usage_frame() -> None:
     carrying token usage and an empty choices array. We must surface it on
     the collected completion (it was dropped entirely before)."""
     chunks: list[dict[str, Any]] = [
-        {"id": "u", "model": "m", "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]},
-        {"id": "u", "model": "m", "choices": [],
-         "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}},
+        {
+            "id": "u",
+            "model": "m",
+            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "u",
+            "model": "m",
+            "choices": [],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
+        },
     ]
     result = _collect_completion(chunks)
     assert result["choices"][0]["message"]["content"] == "hi"

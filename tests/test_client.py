@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json as jsonlib
+from importlib.metadata import version
 
 import httpx
 import pytest
@@ -9,8 +10,14 @@ import pytest
 from trustedrouter import (
     AUTO_MODEL,
     DEFAULT_API_BASE_URL,
+    FUSION_FREEDOM_FALLBACK_JUDGES,
+    FUSION_FREEDOM_PANEL,
+    FUSION_MODEL,
     AsyncTrustedRouter,
     TrustedRouter,
+    __all__,
+    __version__,
+    fusion_tool,
 )
 from trustedrouter.client import TrustedRouterError
 
@@ -59,6 +66,36 @@ def test_auto_model_constant_and_region_provider_helpers() -> None:
         ("GET", f"{DEFAULT_API_BASE_URL}/providers"),
     ]
     client.close()
+
+
+def test_package_exports_fusion_presets_and_consistent_version() -> None:
+    assert __version__ == version("trusted-router-py")
+    assert FUSION_MODEL == "trustedrouter/fusion"
+    assert "FUSION_FREEDOM_PANEL" in __all__
+    assert "FUSION_FREEDOM_FALLBACK_JUDGES" in __all__
+    assert "fusion_tool" in __all__
+    assert len(FUSION_FREEDOM_PANEL) >= 3
+    assert len(FUSION_FREEDOM_FALLBACK_JUDGES) >= 3
+    assert "z-ai/glm-5.1" not in FUSION_FREEDOM_PANEL
+    assert "z-ai/glm-5.1" not in FUSION_FREEDOM_FALLBACK_JUDGES
+    assert FUSION_FREEDOM_PANEL[:5] == (
+        "minimax/minimax-m3",
+        "~kimi/latest",
+        "~zai/glm-latest",
+        "google/gemma-4-31b-it",
+        "deepseek/deepseek-v4-flash",
+    )
+    assert FUSION_FREEDOM_FALLBACK_JUDGES[0] == "minimax/minimax-m3"
+    assert "~zai/glm-latest" in FUSION_FREEDOM_FALLBACK_JUDGES
+
+    tool = fusion_tool(
+        analysis_models=FUSION_FREEDOM_PANEL,
+        fallback_judges=FUSION_FREEDOM_FALLBACK_JUDGES,
+    )
+
+    assert tool["type"] == "trustedrouter:fusion"
+    assert tool["parameters"]["analysis_models"] == list(FUSION_FREEDOM_PANEL)
+    assert tool["parameters"]["fallback_judges"] == list(FUSION_FREEDOM_FALLBACK_JUDGES)
 
 
 def test_checkout_and_auth_helpers_send_expected_shapes() -> None:

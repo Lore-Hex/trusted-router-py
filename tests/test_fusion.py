@@ -27,7 +27,7 @@ _SSE = (
 def test_fusion_tool_only_sets_provided_fields() -> None:
     tool = fusion_tool(
         analysis_models=["a", "b"],
-        model="z-ai/glm-5.1",
+        model="~zai/glm-latest",
         selection_strategy="first_non_refusal",
         fallback_judges=["j1", "j2"],
         max_completion_tokens=2048,
@@ -36,7 +36,7 @@ def test_fusion_tool_only_sets_provided_fields() -> None:
         "type": "trustedrouter:fusion",
         "parameters": {
             "analysis_models": ["a", "b"],
-            "model": "z-ai/glm-5.1",
+            "model": "~zai/glm-latest",
             "selection_strategy": "first_non_refusal",
             "fallback_judges": ["j1", "j2"],
             "max_completion_tokens": 2048,
@@ -75,7 +75,7 @@ def test_sync_fusion_posts_fusion_model_with_tool() -> None:
     resp = sdk.fusion(
         messages=[{"role": "user", "content": "hi"}],
         analysis_models=FUSION_FREEDOM_PANEL,
-        model="z-ai/glm-5.1",
+        model="~zai/glm-latest",
         selection_strategy="first_non_refusal",
         fallback_judges=FUSION_FREEDOM_FALLBACK_JUDGES,
         max_completion_tokens=2048,
@@ -87,10 +87,38 @@ def test_sync_fusion_posts_fusion_model_with_tool() -> None:
     params = seen["tools"][0]["parameters"]
     assert seen["tools"][0]["type"] == "trustedrouter:fusion"
     assert params["analysis_models"] == list(FUSION_FREEDOM_PANEL)
-    assert params["model"] == "z-ai/glm-5.1"
+    assert params["model"] == "~zai/glm-latest"
     assert params["selection_strategy"] == "first_non_refusal"
     assert params["fallback_judges"] == list(FUSION_FREEDOM_FALLBACK_JUDGES)
     assert resp.choices[0].message.content == "ok"
+    sdk.close()
+
+
+def test_sync_fusion_freedom_panel_defers_fuser_and_strategy_to_gateway() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(jsonlib.loads(request.content.decode()))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE
+        )
+
+    sdk = TrustedRouter(
+        api_key="sk-tr-sync",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    sdk.fusion(
+        messages=[{"role": "user", "content": "hi"}],
+        analysis_models=FUSION_FREEDOM_PANEL,
+    )
+
+    params = seen["tools"][0]["parameters"]
+    assert params == {"analysis_models": list(FUSION_FREEDOM_PANEL)}
+    assert params["analysis_models"][0] == "minimax/minimax-m3"
+    assert "model" not in params
+    assert "selection_strategy" not in params
+    assert "fallback_final_models" not in params
     sdk.close()
 
 
@@ -111,9 +139,9 @@ async def test_async_fusion_posts_fusion_model_with_tool() -> None:
     resp = await sdk.fusion(
         messages=[{"role": "user", "content": "hi"}],
         analysis_models=FUSION_FREEDOM_PANEL,
-        model="z-ai/glm-5.1",
+        model="~zai/glm-latest",
     )
     assert seen["model"] == FUSION_MODEL
-    assert seen["tools"][0]["parameters"]["model"] == "z-ai/glm-5.1"
+    assert seen["tools"][0]["parameters"]["model"] == "~zai/glm-latest"
     assert resp.choices[0].message.content == "ok"
     await sdk.aclose()

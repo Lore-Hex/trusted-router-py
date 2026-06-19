@@ -56,8 +56,7 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
     resp = client.fusion(
         messages=[{"role": "user", "content": "explain how mRNA vaccines work"}],
         analysis_models=FUSION_FREEDOM_PANEL,       # the panel
-        model="z-ai/glm-5.1",                       # judge / synthesis model
-        selection_strategy="first_non_refusal",     # or synthesize / synthesize_non_refusals / first_success
+        # omit selection_strategy to use synthesize_non_refusals
         fallback_judges=FUSION_FREEDOM_FALLBACK_JUDGES,  # tried in order if a judge refuses/fails
     )
     print(resp.choices[0].message.content)
