@@ -36,6 +36,7 @@ DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 DEFAULT_FUSION_TIMEOUT_SECONDS = 600.0
 AUTO_MODEL = "trustedrouter/auto"
+FAST_MODEL = "trustedrouter/fast"
 FUSION_MODEL = "trustedrouter/fusion"
 
 # Recommended panel + judge fallback chain for maximum willingness to answer.

@@ -12,6 +12,7 @@ from trustedrouter import (
     DEFAULT_API_BASE_URL,
     DEFAULT_FUSION_TIMEOUT_SECONDS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    FAST_MODEL,
     FUSION_FREEDOM_FALLBACK_FINALS,
     FUSION_FREEDOM_FALLBACK_JUDGES,
     FUSION_FREEDOM_PANEL,
@@ -62,6 +63,7 @@ def test_auto_model_constant_and_region_provider_helpers() -> None:
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
 
     assert AUTO_MODEL == "trustedrouter/auto"
+    assert FAST_MODEL == "trustedrouter/fast"
     assert client.regions().data[1].id == "europe-west4"
     assert client.providers().data[0].id == "vertex"
     assert seen == [
