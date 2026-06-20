@@ -387,3 +387,15 @@ def test_fetch_userinfo_async_owned_client() -> None:
         return await fetch_userinfo_async(api_key="k")
 
     assert _run(run()) == {"sub": "aowned"}
+
+
+# ---- DRY: shared plumbing with the client (no drifting copies) -------------
+
+
+def test_oauth_reuses_client_json_or_raise() -> None:
+    """The OAuth helpers must share the client's single `_json_or_raise`
+    implementation rather than keep a local copy that can drift."""
+    from trustedrouter import client as client_mod
+    from trustedrouter import oauth as oauth_mod
+
+    assert oauth_mod._json_or_raise is client_mod._json_or_raise

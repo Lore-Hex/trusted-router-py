@@ -383,7 +383,7 @@ async def _aiter_sse_events(response: httpx.Response) -> AsyncIterator[dict[str,
 
 def _delta_text(chunk: Mapping[str, Any]) -> str:
     choices = chunk.get("choices") or []
-    if not choices:
+    if not choices or not isinstance(choices[0], dict):
         return ""
     delta = choices[0].get("delta") or {}
     content = delta.get("content")
@@ -461,7 +461,7 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(chunk_usage, dict):
             usage = chunk_usage
         choices = c.get("choices") or []
-        if not choices:
+        if not choices or not isinstance(choices[0], dict):
             continue
         choice0 = choices[0]
         delta = choice0.get("delta") or {}
@@ -769,13 +769,13 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             response.read()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -831,13 +831,13 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             response.read()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -848,6 +848,64 @@ class TrustedRouter:
                         _raise_for_stream_response(response)
                     for chunk in _iter_sse_chunks(response):
                         yield ChatCompletionChunk.model_validate(chunk)
+                    return
+            except httpx.TransportError as exc:
+                if response_opened or attempt >= self.max_retries:
+                    raise _transport_retry_error(exc) from exc
+                if base_index < len(self._base_urls) - 1:
+                    base_index += 1
+                time.sleep(_retry_sleep(attempt, retry_after=None))
+                attempt += 1
+
+    def chat_completions_raw_stream(
+        self,
+        *,
+        model: str,
+        messages: list[Mapping[str, Any]],
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
+        **params: Any,
+    ) -> Iterator[bytes]:
+        """Pass-through SSE bytes. For relays that need to forward the
+        raw `data: {...}\\n\\n` framing without decoding (e.g. an HTTP
+        proxy in front of the gateway)."""
+        request_idempotency_key = idempotency_key or _new_idempotency_key()
+        attempt = 0
+        base_index = 0
+        while True:
+            req = self._build_chat_request(
+                model=model,
+                messages=messages,
+                api_key=api_key,
+                params=params,
+                extra_headers=extra_headers,
+                idempotency_key=request_idempotency_key,
+                timeout=timeout,
+                base_url=self._base_urls[base_index],
+            )
+            response_opened = False
+            try:
+                with self._client.stream(**req) as response:
+                    response_opened = True
+                    if response.is_error:
+                        if attempt < self.max_retries and _retryable(response.status_code):
+                            response.read()
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
+                            time.sleep(
+                                _retry_sleep(
+                                    attempt, retry_after=_retry_after_seconds(response.headers)
+                                )
+                            )
+                            attempt += 1
+                            continue
+                        _raise_for_stream_response(response)
+                    yield from response.iter_bytes()
                     return
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
@@ -891,13 +949,13 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             response.read()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -997,19 +1055,25 @@ class TrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         max_tokens: int = 1024,
+        idempotency_key: str | None = None,
         **params: Any,
     ) -> MessagesResponse:
         """Anthropic-shape Messages endpoint. For providers that expose
         the native Anthropic API (rather than translating to/from
         OpenAI shape), this preserves system prompts, content blocks,
         and tool_use semantics that the OpenAI shape can't carry."""
+        # Auto-key so a retried 5xx on a mutating POST can't duplicate the
+        # generation (matches chat_completions).
+        idempotency_key = idempotency_key or _new_idempotency_key()
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             **params,
         }
-        return MessagesResponse.model_validate(self.request("POST", "/messages", json=body))
+        return MessagesResponse.model_validate(
+            self.request("POST", "/messages", json=body, idempotency_key=idempotency_key)
+        )
 
     def responses(
         self,
@@ -1086,13 +1150,13 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             response.read()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1150,13 +1214,13 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             response.read()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1213,6 +1277,9 @@ class TrustedRouter:
         """Create a Stripe checkout session. Pass `idempotency_key=` to
         guarantee at-most-once charge semantics across network retries
         — strongly recommended for production."""
+        # Auto-key so a retried 5xx on this mutating POST can't double-charge
+        # (matches chat_completions). Callers can still pass their own key.
+        idempotency_key = idempotency_key or _new_idempotency_key()
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
             body["payment_method"] = payment_method
@@ -1331,15 +1398,26 @@ class TrustedRouter:
         response = self._client.get(url)
         return _json_or_raise(response)
 
-    def attestation(self) -> bytes:
+    def attestation(self, *, nonce: str | None = None) -> bytes:
         """Fetch the gateway's live attestation document. Returns the raw
         JWT bytes (Confidential Space mints an OIDC JWT). Pass to
-        `trustedrouter.attestation.verify_gateway_attestation` to verify."""
+        `trustedrouter.attestation.verify_gateway_attestation` to verify.
+
+        Pass `nonce=` to bind this fetch to a freshly-generated value: it's
+        sent as the `nonce` query param so the gateway echoes it inside the
+        signed document, and you then pass the *same* value to
+        `verify_gateway_attestation(nonce_hex=...)` for replay defense."""
         # /attestation lives at the API root, not under /v1
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
-        response = self._client.get(url)
+        params = {"nonce": nonce} if nonce is not None else None
+        response = self._client.get(url, params=params)
         if response.is_error:
-            raise TrustedRouterError(response.status_code, response.text[:240])
+            raise _classify_error(
+                response.status_code,
+                response.text[:240],
+                payload=None,
+                retry_after=_retry_after_seconds(response.headers),
+            )
         return response.content
 
     def trust_release(self, url: str = DEFAULT_TRUST_RELEASE_URL) -> TrustRelease:
@@ -1531,13 +1609,13 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             await response.aread()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1591,13 +1669,13 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             await response.aread()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1650,13 +1728,13 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             await response.aread()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1708,13 +1786,13 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             await response.aread()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1807,15 +1885,21 @@ class AsyncTrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         max_tokens: int = 1024,
+        idempotency_key: str | None = None,
         **params: Any,
     ) -> MessagesResponse:
+        # Auto-key so a retried 5xx on a mutating POST can't duplicate the
+        # generation (matches chat_completions).
+        idempotency_key = idempotency_key or _new_idempotency_key()
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             **params,
         }
-        return MessagesResponse.model_validate(await self.request("POST", "/messages", json=body))
+        return MessagesResponse.model_validate(
+            await self.request("POST", "/messages", json=body, idempotency_key=idempotency_key)
+        )
 
     async def responses(
         self,
@@ -1890,13 +1974,13 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             await response.aread()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1955,13 +2039,13 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
-                        ):
+                        if attempt < self.max_retries and _retryable(response.status_code):
                             await response.aread()
-                            base_index += 1
+                            if (
+                                _regional_failoverable(response.status_code)
+                                and base_index < len(self._base_urls) - 1
+                            ):
+                                base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -2016,6 +2100,9 @@ class AsyncTrustedRouter:
         cancel_url: str | None = None,
         idempotency_key: str | None = None,
     ) -> CheckoutSession:
+        # Auto-key so a retried 5xx on this mutating POST can't double-charge
+        # (matches chat_completions). Callers can still pass their own key.
+        idempotency_key = idempotency_key or _new_idempotency_key()
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
             body["payment_method"] = payment_method
@@ -2136,12 +2223,27 @@ class AsyncTrustedRouter:
         response = await self._client.get(url)
         return _json_or_raise(response)
 
-    async def attestation(self) -> bytes:
+    async def attestation(self, *, nonce: str | None = None) -> bytes:
+        """Fetch the gateway's live attestation document. Returns the raw
+        JWT bytes. Pass `nonce=` to bind the fetch to a freshly-generated
+        value (sent as the `nonce` query param and echoed inside the signed
+        document); pass the same value to
+        `verify_gateway_attestation(nonce_hex=...)` for replay defense."""
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
-        response = await self._client.get(url)
+        params = {"nonce": nonce} if nonce is not None else None
+        response = await self._client.get(url, params=params)
         if response.is_error:
-            raise TrustedRouterError(response.status_code, response.text[:240])
+            raise _classify_error(
+                response.status_code,
+                response.text[:240],
+                payload=None,
+                retry_after=_retry_after_seconds(response.headers),
+            )
         return response.content
+
+    async def trust_release(self, url: str = DEFAULT_TRUST_RELEASE_URL) -> TrustRelease:
+        response = await self._client.get(url)
+        return TrustRelease.model_validate(_json_or_raise(response))
 
 
 def fetch_trust_release(

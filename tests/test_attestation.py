@@ -74,6 +74,9 @@ def _good_claims(*, nonce_hex: str | None = None) -> dict[str, object]:
         "iss": GCP_ISSUER,
         "aud": ["quill-cloud"],
         "exp": int(time.time()) + 600,
+        # Real CSP production tokens carry this; the verifier rejects a
+        # debug-booted CVM by default (require_production_cvm).
+        "dbgstat": "disabled-since-boot",
         "submods": {
             "container": {
                 "image_digest": "sha256:abc123",
@@ -302,9 +305,77 @@ def test_policy_from_trust_release_pulls_digest_and_reference() -> None:
     assert policy.gcp_audience == "quill-cloud"
 
 
-def test_policy_from_trust_release_handles_missing_fields() -> None:
-    """If the trust release lacks the digest/reference, the policy fields
-    are None — verifier will skip those checks."""
-    policy = policy_from_trust_release(release={})
-    assert policy.expected_image_digest is None
-    assert policy.expected_image_reference is None
+def test_policy_from_trust_release_rejects_image_unbound_release() -> None:
+    """A trust release that pins neither image_digest nor image_reference is a
+    misconfiguration; building an image-unbound policy is refused (fail closed)."""
+    with pytest.raises(AttestationVerificationError):
+        policy_from_trust_release(release={})
+
+
+# ---- security: fail-closed claim checks ---------------------------------
+
+_PINNED_POLICY = AttestationPolicy(
+    gcp_audience="quill-cloud",
+    expected_image_digest="sha256:abc123",
+    expected_image_reference="us-central1-docker.pkg.dev/proj/repo/img:tag",
+)
+
+
+def _verify(claims: dict[str, object], **kw: object) -> object:
+    key = _gen_keypair()
+    jwks = {"keys": [_public_jwk(key)]}
+    jwt = _make_jwt(key, claims)
+    return verify_gateway_attestation(
+        jwt, policy=kw.pop("policy", _PINNED_POLICY),
+        tls_cert_der=_FAKE_CERT, jwks=jwks, **kw,
+    )
+
+
+def test_missing_exp_fails_closed() -> None:
+    claims = _good_claims()
+    del claims["exp"]
+    with pytest.raises(AttestationVerificationError, match="exp"):
+        _verify(claims)
+
+
+def test_float_exp_in_past_fails() -> None:
+    claims = _good_claims()
+    claims["exp"] = float(time.time()) - 60.0
+    with pytest.raises(AttestationVerificationError, match="expired"):
+        _verify(claims)
+
+
+def test_non_list_aud_raises_typed_error() -> None:
+    claims = _good_claims()
+    claims["aud"] = 12345  # not a str or list
+    with pytest.raises(AttestationVerificationError, match="aud"):
+        _verify(claims)
+
+
+def test_debug_cvm_rejected_by_default_but_allowed_when_opted_out() -> None:
+    claims = _good_claims()
+    claims["dbgstat"] = "enabled-since-boot"  # debug-booted → confidentiality void
+    with pytest.raises(AttestationVerificationError, match="dbgstat"):
+        _verify(claims)
+    # explicit opt-out (e.g. testing a debug image) accepts it
+    policy = AttestationPolicy(
+        gcp_audience="quill-cloud",
+        expected_image_digest="sha256:abc123",
+        expected_image_reference="us-central1-docker.pkg.dev/proj/repo/img:tag",
+        require_production_cvm=False,
+    )
+    assert isinstance(_verify(claims, policy=policy), GatewayAttestation)
+
+
+def test_connection_bound_flag_reflects_cert_check() -> None:
+    claims = _good_claims()
+    bound = _verify(claims)
+    assert bound.connection_bound is True
+    # without the live cert we can't confirm THIS connection
+    key = _gen_keypair()
+    jwks = {"keys": [_public_jwk(key)]}
+    unbound = verify_gateway_attestation(
+        _make_jwt(key, _good_claims()), policy=_PINNED_POLICY,
+        tls_cert_der=None, jwks=jwks,
+    )
+    assert unbound.connection_bound is False

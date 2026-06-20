@@ -63,6 +63,11 @@ class AttestationPolicy:
     expected_cert_sha256: str | None = None
     expected_image_digest: str | None = None
     expected_image_reference: str | None = None
+    # Require the Confidential Space VM to have booted non-debug (dbgstat
+    # 'disabled-since-boot'). A debug-enabled CVM's memory-encryption guarantee
+    # is effectively void, so default to rejecting it; set False only to test
+    # against a deliberately debug image.
+    require_production_cvm: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +84,10 @@ class GatewayAttestation:
     expires_at: int | None
     issuer: str | None
     audience: str | None
+    # True only when the caller passed the live connection's leaf cert
+    # (tls_cert_der) AND it matched the JWT-committed hash. False means the
+    # JWT committed to *a* cert but we did not confirm it is THIS connection's.
+    connection_bound: bool
     raw_claims: Mapping[str, Any]
 
     def as_dict(self) -> dict[str, object]:
@@ -90,6 +99,7 @@ class GatewayAttestation:
             "expires_at": self.expires_at,
             "issuer": self.issuer,
             "audience": self.audience,
+            "connection_bound": self.connection_bound,
         }
 
 
@@ -110,6 +120,11 @@ def policy_from_trust_release(
     else:
         image_digest = str(release_obj.get("image_digest") or "") or None
         image_reference = str(release_obj.get("image_reference") or "") or None
+    if image_digest is None and image_reference is None:
+        raise AttestationVerificationError(
+            "trust release pins neither image_digest nor image_reference; "
+            "refusing to build an image-unbound attestation policy"
+        )
     return AttestationPolicy(
         gcp_audience=audience,
         expected_cert_sha256=cert_sha256,
@@ -200,8 +215,13 @@ def _check_claims(
     """Validate every claim the policy requires. Raises on any mismatch.
     Returns a GatewayAttestation if everything checks out."""
     now = int(time.time())
+    # Fail CLOSED on a missing/non-numeric exp: an absent or float exp must
+    # not silently skip the expiry check (a never-expiring or expired token
+    # would otherwise pass). `bool` is an int subclass, so exclude it.
     exp = claims.get("exp")
-    if isinstance(exp, int) and exp <= now:
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        raise AttestationVerificationError("JWT missing or non-numeric 'exp' claim")
+    if exp <= now:
         raise AttestationVerificationError(f"JWT expired at {exp} (now={now})")
 
     iss = claims.get("iss")
@@ -211,8 +231,16 @@ def _check_claims(
         )
 
     aud = claims.get("aud")
-    # `aud` may be a string OR a list per RFC 7519
-    aud_list = [aud] if isinstance(aud, str) else list(aud or [])
+    # `aud` may be a string OR a list per RFC 7519; reject any other type
+    # rather than letting list()/`in` do something surprising on a dict/int.
+    if isinstance(aud, str):
+        aud_list = [aud]
+    elif isinstance(aud, (list, tuple)):
+        aud_list = list(aud)
+    else:
+        raise AttestationVerificationError(
+            f"invalid 'aud' claim type: {type(aud).__name__}"
+        )
     if policy.gcp_audience not in aud_list:
         raise AttestationVerificationError(
             f"audience {policy.gcp_audience!r} not in JWT aud {aud_list!r}"
@@ -267,12 +295,14 @@ def _check_claims(
         )
     cert_sha = cert_sha.lower()
 
+    connection_bound = False
     if tls_cert_der is not None:
         actual = hashlib.sha256(tls_cert_der).hexdigest()
         if not _safe_eq(actual, cert_sha):
             raise AttestationVerificationError(
                 f"TLS cert mismatch: connection={actual!r}, JWT={cert_sha!r}"
             )
+        connection_bound = True
 
     if policy.expected_cert_sha256 and not _safe_eq(
         cert_sha, policy.expected_cert_sha256.lower()
@@ -281,14 +311,27 @@ def _check_claims(
             "JWT-committed cert SHA-256 doesn't match policy pin"
         )
 
+    # Confidentiality guarantee: reject a debug-booted CVM. `dbgstat` lives
+    # top-level or under submods.confidential_space depending on CSP token
+    # version; only 'disabled-since-boot' means memory encryption held.
+    if policy.require_production_cvm:
+        cs = (claims.get("submods") or {}).get("confidential_space") or {}
+        dbgstat = claims.get("dbgstat") or cs.get("dbgstat")
+        if dbgstat != "disabled-since-boot":
+            raise AttestationVerificationError(
+                f"non-production Confidential Space VM (dbgstat={dbgstat!r}); "
+                "expected 'disabled-since-boot'"
+            )
+
     return GatewayAttestation(
         cert_sha256=cert_sha,
         image_digest=str(image_digest),
         image_reference=str(image_reference),
         nonce=nonce_match,
-        expires_at=int(exp) if isinstance(exp, int) else None,
+        expires_at=int(exp),
         issuer=str(iss) if iss else None,
         audience=policy.gcp_audience,
+        connection_bound=connection_bound,
         raw_claims=dict(claims),
     )
 

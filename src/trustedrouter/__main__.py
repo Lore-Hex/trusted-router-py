@@ -24,7 +24,6 @@ import sys
 from trustedrouter import (
     AUTO_MODEL,
     REGION_HOSTS,
-    AsyncTrustedRouter,
     AuthenticationError,
     TrustedRouter,
     TrustedRouterError,
@@ -142,8 +141,9 @@ def _cmd_attest(args: argparse.Namespace) -> int:
             host, port_str = host.rsplit(":", 1)
             port = int(port_str)
         ctx = ssl.create_default_context()
-        raw_sock = socket.create_connection((host, port), timeout=10.0)
-        with ctx.wrap_socket(
+        with socket.create_connection(
+            (host, port), timeout=10.0
+        ) as raw_sock, ctx.wrap_socket(
             raw_sock,
             server_hostname=host,
         ) as ssock:
@@ -215,7 +215,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-# Delete the unused AsyncTrustedRouter import — keep flake clean.
-_ = AsyncTrustedRouter

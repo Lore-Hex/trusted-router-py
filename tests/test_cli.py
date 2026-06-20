@@ -28,6 +28,21 @@ def _patch_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:  # type: ig
     monkeypatch.setattr(cli, "_client", fake_client)
 
 
+class _FakeRawSocket:
+    """Context-manager stand-in for the raw socket from
+    socket.create_connection. Records whether __exit__ ran so a test can
+    assert the socket is always closed (even when wrap_socket raises)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __enter__(self) -> _FakeRawSocket:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.closed = True
+
+
 def test_help_and_version_strings(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["--help"])
@@ -226,7 +241,9 @@ def test_attest_verify_success(
 
     _patch_client(monkeypatch, handler)
     monkeypatch.setattr(cli.ssl, "create_default_context", lambda: FakeSSLContext())
-    monkeypatch.setattr(cli.socket, "create_connection", lambda _target, timeout: object())
+    monkeypatch.setattr(
+        cli.socket, "create_connection", lambda _target, timeout: _FakeRawSocket()
+    )
     import trustedrouter.attestation as attestation
 
     monkeypatch.setattr(attestation, "policy_from_trust_release", lambda: {"policy": "ok"})
@@ -251,7 +268,35 @@ def test_attest_verify_error_returns_code_1(
             raise RuntimeError("no tls")
 
     monkeypatch.setattr(cli.ssl, "create_default_context", lambda: BrokenSSL())
-    monkeypatch.setattr(cli.socket, "create_connection", lambda _target, timeout: object())
+    monkeypatch.setattr(
+        cli.socket, "create_connection", lambda _target, timeout: _FakeRawSocket()
+    )
     rc = cli.main(["attest", "--verify"])
     assert rc == 1
     assert "no tls" in capsys.readouterr().err
+
+
+def test_attest_verify_closes_raw_socket_when_wrap_socket_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The raw socket must be closed via its context manager even when
+    ctx.wrap_socket() raises, so a failed TLS handshake doesn't leak the
+    fd."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<JWT>")
+
+    _patch_client(monkeypatch, handler)
+
+    raw = _FakeRawSocket()
+
+    class BrokenSSL:
+        def wrap_socket(self, *_args: Any, **_kwargs: Any) -> object:
+            raise RuntimeError("no tls")
+
+    monkeypatch.setattr(cli.ssl, "create_default_context", lambda: BrokenSSL())
+    monkeypatch.setattr(cli.socket, "create_connection", lambda _target, timeout: raw)
+    rc = cli.main(["attest", "--verify"])
+    assert rc == 1
+    assert raw.closed is True
