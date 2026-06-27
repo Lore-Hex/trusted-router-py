@@ -170,3 +170,64 @@ def test_plain_text_turn_still_has_no_tool_calls_key() -> None:
     )
     assert "tool_calls" not in result["choices"][0]["message"]
     assert result["choices"][0]["message"]["content"] == "hello"
+
+
+def test_preserves_trustedrouter_synth_stream_events_and_details() -> None:
+    """Synth observability is streamed as TR extension chunks with no choices.
+    Collected chat completions should keep those details for logging/debugging."""
+    chunks: list[dict[str, Any]] = [
+        {
+            "id": "r",
+            "model": "trustedrouter/synth",
+            "choices": [],
+            "trustedrouter": {"synth": {"event": "synth.started", "preset": "quality"}},
+        },
+        {
+            "id": "r",
+            "model": "trustedrouter/synth",
+            "choices": [],
+            "trustedrouter": {
+                "synth": {
+                    "event": "panel.done",
+                    "stage": "panel",
+                    "index": 0,
+                    "model": "model/a",
+                    "detail": {
+                        "model": "model/a",
+                        "finish_reason": "stop",
+                        "visible_answer": "candidate answer",
+                    },
+                }
+            },
+        },
+        {
+            "id": "r",
+            "model": "model/final",
+            "choices": [{"delta": {"content": "final answer"}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "r",
+            "model": "model/final",
+            "choices": [],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
+            "trustedrouter": {"synth": {"cost_microdollars": 42}},
+        },
+    ]
+
+    result = _collect_completion(chunks)
+
+    assert result["choices"][0]["message"]["content"] == "final answer"
+    assert result["trustedrouter"]["synth"]["cost_microdollars"] == 42
+    assert [e["event"] for e in result["trustedrouter"]["synth"]["events"]] == [
+        "synth.started",
+        "panel.done",
+    ]
+    assert result["trustedrouter"]["synth"]["panel"] == [
+        {
+            "model": "model/a",
+            "finish_reason": "stop",
+            "visible_answer": "candidate answer",
+            "stage": "panel",
+            "index": 0,
+        }
+    ]

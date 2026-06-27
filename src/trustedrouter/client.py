@@ -453,6 +453,7 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     finish_reason: str | None = None
     role = "assistant"
     usage: dict[str, Any] | None = None
+    trustedrouter = _collect_trustedrouter_metadata(chunks)
     # tool-call deltas arrive fragmented and keyed by `index`; the arguments
     # stream in pieces and must be concatenated in arrival order.
     tool_calls: dict[int, dict[str, Any]] = {}
@@ -512,7 +513,78 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
     }
     if usage is not None:
         result["usage"] = usage
+    if trustedrouter is not None:
+        result["trustedrouter"] = trustedrouter
     return result
+
+
+def _collect_trustedrouter_metadata(chunks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Preserve TrustedRouter extension metadata from streamed chunks.
+
+    The gateway streams Synth observability as top-level ``trustedrouter`` events
+    with empty ``choices``. The collector used to rebuild only OpenAI core fields,
+    which meant callers of ``chat_completions`` lost panel/judge/final details.
+    """
+
+    synth_events: list[dict[str, Any]] = []
+    synth_details: dict[str, Any] = {}
+
+    for chunk in chunks:
+        trusted = chunk.get("trustedrouter")
+        if not isinstance(trusted, Mapping):
+            continue
+        synth = trusted.get("synth")
+        if not isinstance(synth, Mapping):
+            continue
+
+        synth_dict = dict(synth)
+        if "event" in synth_dict:
+            synth_events.append(synth_dict)
+        else:
+            synth_details.update(synth_dict)
+
+    if not synth_events and not synth_details:
+        return None
+
+    synth_out = dict(synth_details)
+    if synth_events:
+        synth_out["events"] = synth_events
+
+    panel: list[dict[str, Any]] = []
+    judge_attempts: list[dict[str, Any]] = []
+    final_attempts: list[dict[str, Any]] = []
+    for event in synth_events:
+        event_name = event.get("event")
+        detail = _trustedrouter_synth_event_detail(event)
+        if detail is None:
+            continue
+        if event_name == "panel.done":
+            panel.append(detail)
+        elif event_name == "judge.done":
+            judge_attempts.append(detail)
+        elif event_name == "final.done":
+            final_attempts.append(detail)
+
+    if panel and "panel" not in synth_out:
+        synth_out["panel"] = panel
+    if judge_attempts:
+        synth_out.setdefault("judge_attempts", judge_attempts)
+        synth_out.setdefault("judge", judge_attempts[-1])
+    if final_attempts and "final_attempts" not in synth_out:
+        synth_out["final_attempts"] = final_attempts
+
+    return {"synth": synth_out}
+
+
+def _trustedrouter_synth_event_detail(event: Mapping[str, Any]) -> dict[str, Any] | None:
+    detail = event.get("detail")
+    if not isinstance(detail, Mapping):
+        return None
+    out = dict(detail)
+    for key in ("stage", "index", "model"):
+        if key in event and key not in out:
+            out[key] = event[key]
+    return out
 
 
 def _with_usage(params: Mapping[str, Any]) -> dict[str, Any]:
