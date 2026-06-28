@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from trustedrouter import (
+    ADVISOR_MODEL,
     AUTO_MODEL,
     DEFAULT_API_BASE_URL,
     DEFAULT_FUSION_TIMEOUT_SECONDS,
@@ -17,10 +18,12 @@ from trustedrouter import (
     FUSION_FREEDOM_FALLBACK_JUDGES,
     FUSION_FREEDOM_PANEL,
     FUSION_MODEL,
+    SOCRATES_MODEL,
     AsyncTrustedRouter,
     TrustedRouter,
     __all__,
     __version__,
+    advisor_tool,
     fusion_tool,
 )
 from trustedrouter.client import TrustedRouterError
@@ -64,6 +67,8 @@ def test_auto_model_constant_and_region_provider_helpers() -> None:
 
     assert AUTO_MODEL == "trustedrouter/auto"
     assert FAST_MODEL == "trustedrouter/fast"
+    assert SOCRATES_MODEL == "trustedrouter/socrates-1.0"
+    assert ADVISOR_MODEL == "trustedrouter/advisor"
     assert client.regions().data[1].id == "europe-west4"
     assert client.providers().data[0].id == "vertex"
     assert seen == [
@@ -83,6 +88,9 @@ def test_package_exports_fusion_presets_and_consistent_version() -> None:
     assert "FUSION_FREEDOM_FALLBACK_FINALS" in __all__
     assert "DEFAULT_FUSION_TIMEOUT_SECONDS" in __all__
     assert "fusion_tool" in __all__
+    assert "SOCRATES_MODEL" in __all__
+    assert "ADVISOR_MODEL" in __all__
+    assert "advisor_tool" in __all__
     assert len(FUSION_FREEDOM_PANEL) >= 3
     assert len(FUSION_FREEDOM_FALLBACK_JUDGES) >= 3
     assert len(FUSION_FREEDOM_FALLBACK_FINALS) >= 3
@@ -112,6 +120,10 @@ def test_package_exports_fusion_presets_and_consistent_version() -> None:
     assert tool["parameters"]["fallback_final_models"] == list(
         FUSION_FREEDOM_FALLBACK_FINALS
     )
+    assert advisor_tool(max_get_advice_calls=1) == {
+        "type": "trustedrouter:advisor",
+        "parameters": {"max_get_advice_calls": 1},
+    }
 
 
 def test_checkout_and_auth_helpers_send_expected_shapes() -> None:
