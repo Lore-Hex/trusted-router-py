@@ -40,6 +40,15 @@ FAST_MODEL = "trustedrouter/fast"
 FUSION_MODEL = "trustedrouter/fusion"
 SOCRATES_MODEL = "trustedrouter/socrates-1.0"
 ADVISOR_MODEL = "trustedrouter/advisor"
+_ADVISOR_MODELS = {ADVISOR_MODEL}
+_FUSION_PRIMITIVE_MODELS = {
+    "trustedrouter/fusion",
+    "trustedrouter/fusion-code",
+    "trustedrouter/synth",
+    "trustedrouter/synth-code",
+    "trustedrouter/selector",
+    "trustedrouter/mapreduce",
+}
 
 # Recommended panel + judge fallback chain for maximum willingness to answer.
 # Use gateway-supported latest aliases where possible so examples survive
@@ -131,6 +140,91 @@ def advisor_tool(
     if advisor_timeout_ms is not None:
         parameters["advisor_timeout_ms"] = advisor_timeout_ms
     return {"type": "trustedrouter:advisor", "parameters": parameters}
+
+
+def _move_orchestration_options_into_tools(
+    model: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Lift SDK orchestration kwargs into gateway tool specs.
+
+    The gateway intentionally ignores top-level helper fields such as
+    ``worker_models`` and ``analysis_models``. They must live inside the
+    TrustedRouter tool config so direct ``chat_completions(model=...)`` calls
+    behave the same as the convenience helpers.
+    """
+
+    tools = list(params.pop("tools", []))
+    normalized_model = model.strip().lower()
+
+    advisor_keys = {
+        "depth",
+        "worker_models",
+        "advisor_models",
+        "max_get_advice_calls",
+        "advisor_max_tokens",
+        "advisor_timeout_ms",
+    }
+    advisor_values: dict[str, Any] = {}
+    for key in list(params):
+        if key not in advisor_keys:
+            continue
+        value = params.pop(key)
+        if value is not None:
+            advisor_values[key] = value
+    if advisor_values:
+        tools.append(
+            advisor_tool(
+                depth=advisor_values.get("depth"),
+                worker_models=advisor_values.get("worker_models"),
+                advisor_models=advisor_values.get("advisor_models"),
+                max_get_advice_calls=advisor_values.get("max_get_advice_calls"),
+                advisor_max_tokens=advisor_values.get("advisor_max_tokens"),
+                advisor_timeout_ms=advisor_values.get("advisor_timeout_ms"),
+            )
+        )
+
+    fusion_key_map = {
+        "analysis_models": "analysis_models",
+        "judge_model": "model",
+        "selection_strategy": "selection_strategy",
+        "fallback_judges": "fallback_judges",
+        "fallback_final_models": "fallback_final_models",
+        "max_completion_tokens": "max_completion_tokens",
+        "max_tool_calls": "max_tool_calls",
+        "preset": "preset",
+        "panel_prompt": "panel_prompt",
+        "synthesis_prompt": "synthesis_prompt",
+        "final_prompt": "final_prompt",
+        "selector_models": "selector_models",
+        "selector_model": "selector_model",
+        "selector_prompt": "selector_prompt",
+        "mapper_models": "mapper_models",
+        "mapper_model": "mapper_model",
+        "mapper_prompt": "mapper_prompt",
+        "parallel_models": "parallel_models",
+        "parallel_model": "parallel_model",
+        "parallel_prompt": "parallel_prompt",
+        "reducer_models": "reducer_models",
+        "reducer_model": "reducer_model",
+        "reducer_prompt": "reducer_prompt",
+    }
+    fusion_values: dict[str, Any] = {}
+    for sdk_key, gateway_key in fusion_key_map.items():
+        if sdk_key not in params:
+            continue
+        value = params.pop(sdk_key)
+        if value is not None:
+            fusion_values[gateway_key] = value
+    if fusion_values:
+        tools.append({"type": "trustedrouter:fusion", "parameters": fusion_values})
+
+    if tools:
+        params["tools"] = tools
+    elif normalized_model in _ADVISOR_MODELS or normalized_model in _FUSION_PRIMITIVE_MODELS:
+        params.pop("tools", None)
+
+    return params
 
 
 # Region routing — see https://trust.trustedrouter.com for the live list.
@@ -825,6 +919,7 @@ class TrustedRouter:
         workspace_id = params_dict.pop("workspace_id", None)
         for reserved in ("extra_headers", "idempotency_key", "timeout", "api_key"):
             params_dict.pop(reserved, None)
+        params_dict = _move_orchestration_options_into_tools(model, params_dict)
         body = {"model": model, "messages": messages, "stream": True, **params_dict}
         return _build_stream_request(
             "POST",
@@ -1619,6 +1714,7 @@ class AsyncTrustedRouter:
         workspace_id = params_dict.pop("workspace_id", None)
         for reserved in ("extra_headers", "idempotency_key", "timeout", "api_key"):
             params_dict.pop(reserved, None)
+        params_dict = _move_orchestration_options_into_tools(model, params_dict)
         body = {"model": model, "messages": messages, "stream": True, **params_dict}
         return _build_stream_request(
             "POST",
