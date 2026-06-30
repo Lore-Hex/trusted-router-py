@@ -17,7 +17,6 @@ from trustedrouter.client import (
     FUSION_FREEDOM_PANEL,
     FUSION_MODEL,
     REGION_HOSTS,
-    SOCRATES_MODEL,
     AsyncTrustedRouter,
     AuthenticationError,
     BadRequestError,
@@ -82,7 +81,7 @@ from trustedrouter.oauth import (
     random_oauth_state,
 )
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 __all__ = [
     "ActivityEvent",
@@ -141,7 +140,6 @@ __all__ = [
     "ResponseObject",
     "ResponseOutputItem",
     "ResponseUsage",
-    "SOCRATES_MODEL",
     "TrustRelease",
     "TrustReleaseDataPolicy",
     "TrustReleaseTLS",

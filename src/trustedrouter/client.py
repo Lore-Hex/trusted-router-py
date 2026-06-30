@@ -38,7 +38,6 @@ DEFAULT_FUSION_TIMEOUT_SECONDS = 600.0
 AUTO_MODEL = "trustedrouter/auto"
 FAST_MODEL = "trustedrouter/fast"
 FUSION_MODEL = "trustedrouter/fusion"
-SOCRATES_MODEL = "trustedrouter/socrates-1.0"
 ADVISOR_MODEL = "trustedrouter/advisor"
 _ADVISOR_MODELS = {ADVISOR_MODEL}
 _FUSION_PRIMITIVE_MODELS = {
@@ -120,11 +119,13 @@ def advisor_tool(
     advisor_max_tokens: int | None = None,
     advisor_timeout_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Build a ``trustedrouter:advisor`` tool spec for Socrates orchestration.
+    """Build a ``trustedrouter:advisor`` tool spec.
 
-    Socrates runs a fast worker model and gives it one private zero-argument
-    ``_trustedrouter_get_advice`` tool. The gateway executes that internal tool
-    only when the worker asks for help.
+    Advisor orchestration runs a worker model and gives it one private
+    zero-argument ``_trustedrouter_get_advice`` tool. The gateway executes that
+    internal tool only when the worker asks for help. Most callers should pass
+    these options directly to ``chat_completions(model=...)``; the SDK lifts
+    them into this tool config.
     """
     parameters: dict[str, Any] = {}
     if depth is not None:
@@ -1152,33 +1153,6 @@ class TrustedRouter:
             model=FUSION_MODEL, messages=messages, tools=tools, **params
         )
 
-    def socrates(
-        self,
-        *,
-        messages: list[Mapping[str, Any]],
-        depth: int | None = None,
-        worker_models: Sequence[str] | None = None,
-        advisor_models: Sequence[str] | None = None,
-        max_get_advice_calls: int | None = None,
-        advisor_max_tokens: int | None = None,
-        advisor_timeout_ms: int | None = None,
-        model: str = SOCRATES_MODEL,
-        **params: Any,
-    ) -> ChatCompletion:
-        """Run a request through TrustedRouter Socrates advisor orchestration."""
-        tools = list(params.pop("tools", []))
-        tools.append(
-            advisor_tool(
-                depth=depth,
-                worker_models=worker_models,
-                advisor_models=advisor_models,
-                max_get_advice_calls=max_get_advice_calls,
-                advisor_max_tokens=advisor_max_tokens,
-                advisor_timeout_ms=advisor_timeout_ms,
-            )
-        )
-        return self.chat_completions(model=model, messages=messages, tools=tools, **params)
-
     def models(self) -> ModelList:
         return ModelList.model_validate(self.request("GET", "/models"))
 
@@ -1993,35 +1967,6 @@ class AsyncTrustedRouter:
         )
         return await self.chat_completions(
             model=FUSION_MODEL, messages=messages, tools=tools, **params
-        )
-
-    async def socrates(
-        self,
-        *,
-        messages: list[Mapping[str, Any]],
-        depth: int | None = None,
-        worker_models: Sequence[str] | None = None,
-        advisor_models: Sequence[str] | None = None,
-        max_get_advice_calls: int | None = None,
-        advisor_max_tokens: int | None = None,
-        advisor_timeout_ms: int | None = None,
-        model: str = SOCRATES_MODEL,
-        **params: Any,
-    ) -> ChatCompletion:
-        """Async TrustedRouter Socrates — mirror of TrustedRouter.socrates."""
-        tools = list(params.pop("tools", []))
-        tools.append(
-            advisor_tool(
-                depth=depth,
-                worker_models=worker_models,
-                advisor_models=advisor_models,
-                max_get_advice_calls=max_get_advice_calls,
-                advisor_max_tokens=advisor_max_tokens,
-                advisor_timeout_ms=advisor_timeout_ms,
-            )
-        )
-        return await self.chat_completions(
-            model=model, messages=messages, tools=tools, **params
         )
 
     async def models(self) -> ModelList:

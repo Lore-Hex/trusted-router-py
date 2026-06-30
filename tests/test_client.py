@@ -18,7 +18,6 @@ from trustedrouter import (
     FUSION_FREEDOM_FALLBACK_JUDGES,
     FUSION_FREEDOM_PANEL,
     FUSION_MODEL,
-    SOCRATES_MODEL,
     AsyncTrustedRouter,
     TrustedRouter,
     __all__,
@@ -67,7 +66,6 @@ def test_auto_model_constant_and_region_provider_helpers() -> None:
 
     assert AUTO_MODEL == "trustedrouter/auto"
     assert FAST_MODEL == "trustedrouter/fast"
-    assert SOCRATES_MODEL == "trustedrouter/socrates-1.0"
     assert ADVISOR_MODEL == "trustedrouter/advisor"
     assert client.regions().data[1].id == "europe-west4"
     assert client.providers().data[0].id == "vertex"
@@ -88,7 +86,6 @@ def test_package_exports_fusion_presets_and_consistent_version() -> None:
     assert "FUSION_FREEDOM_FALLBACK_FINALS" in __all__
     assert "DEFAULT_FUSION_TIMEOUT_SECONDS" in __all__
     assert "fusion_tool" in __all__
-    assert "SOCRATES_MODEL" in __all__
     assert "ADVISOR_MODEL" in __all__
     assert "advisor_tool" in __all__
     assert len(FUSION_FREEDOM_PANEL) >= 3

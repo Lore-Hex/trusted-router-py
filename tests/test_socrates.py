@@ -7,7 +7,6 @@ import pytest
 
 from trustedrouter import (
     ADVISOR_MODEL,
-    SOCRATES_MODEL,
     AsyncTrustedRouter,
     TrustedRouter,
     advisor_tool,
@@ -45,7 +44,7 @@ def test_advisor_tool_empty_by_default() -> None:
     assert advisor_tool()["parameters"] == {}
 
 
-def test_sync_socrates_posts_socrates_model_with_tool() -> None:
+def test_sync_direct_socrates_model_lifts_advisor_options_into_tool() -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -58,18 +57,19 @@ def test_sync_socrates_posts_socrates_model_with_tool() -> None:
         api_key="sk-tr-sync",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    resp = sdk.socrates(
+    resp = sdk.chat_completions(
+        model="trustedrouter/socrates-1.0",
         messages=[{"role": "user", "content": "hi"}],
         depth=2,
-        advisor_models=[ADVISOR_MODEL],
+        advisor_models=["anthropic/claude-opus-4.8"],
         max_get_advice_calls=1,
     )
-    assert seen["model"] == SOCRATES_MODEL
+    assert seen["model"] == "trustedrouter/socrates-1.0"
     assert len(seen["tools"]) == 1
     assert seen["tools"][0]["type"] == "trustedrouter:advisor"
     assert seen["tools"][0]["parameters"] == {
         "depth": 2,
-        "advisor_models": [ADVISOR_MODEL],
+        "advisor_models": ["anthropic/claude-opus-4.8"],
         "max_get_advice_calls": 1,
     }
     assert resp.choices[0].message.content == "ok"
@@ -150,7 +150,7 @@ def test_sync_chat_completions_lifts_direct_synth_options_into_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_socrates_posts_socrates_model_with_tool() -> None:
+async def test_async_direct_socrates_model_lifts_advisor_options_into_tool() -> None:
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -163,12 +163,13 @@ async def test_async_socrates_posts_socrates_model_with_tool() -> None:
         api_key="sk-tr-async",
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    resp = await sdk.socrates(
+    resp = await sdk.chat_completions(
+        model="trustedrouter/socrates-1.0",
         messages=[{"role": "user", "content": "hi"}],
         worker_models=["cerebras/gpt-oss-120b"],
         advisor_timeout_ms=90000,
     )
-    assert seen["model"] == SOCRATES_MODEL
+    assert seen["model"] == "trustedrouter/socrates-1.0"
     assert seen["tools"][0]["type"] == "trustedrouter:advisor"
     assert seen["tools"][0]["parameters"] == {
         "worker_models": ["cerebras/gpt-oss-120b"],
