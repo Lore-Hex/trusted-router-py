@@ -19,6 +19,7 @@ We intentionally don't ship dict-like __getitem__ shims — pydantic models
 support `.model_dump()` for one-line conversion, and exposing both shapes
 makes it tempting to mix them. The README explains the migration path.
 """
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -103,8 +104,8 @@ class ChatCompletionChunk(_Base):
 class ModelPricing(_Base):
     prompt: str | None = None
     completion: str | None = None
-    prompt_max: str | None = None       # set on `trustedrouter/auto`
-    completion_max: str | None = None   # set on `trustedrouter/auto`
+    prompt_max: str | None = None  # set on `trustedrouter/auto`
+    completion_max: str | None = None  # set on `trustedrouter/auto`
 
 
 class ModelArchitecture(_Base):
@@ -134,6 +135,18 @@ class ModelInfo(_Base):
     top_provider: ModelTopProvider = Field(default_factory=ModelTopProvider)
     per_request_limits: dict[str, Any] | None = None
     trustedrouter: dict[str, Any] | None = None  # TR-specific extension block
+
+    @property
+    def open_weights(self) -> bool:
+        return bool((self.trustedrouter or {}).get("open_weights"))
+
+    @property
+    def us_provider_available(self) -> bool:
+        return bool((self.trustedrouter or {}).get("us_provider_available"))
+
+    @property
+    def eu_focused_provider_available(self) -> bool:
+        return bool((self.trustedrouter or {}).get("eu_focused_provider_available"))
 
 
 class ModelList(_Base):

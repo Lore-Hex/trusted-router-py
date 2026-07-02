@@ -9,6 +9,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -778,6 +779,24 @@ def _broadcast_destination_body(
     return body
 
 
+def _models_path(
+    *,
+    open_weights: bool | None = None,
+    provider_jurisdiction: str | None = None,
+    provider_region: str | None = None,
+) -> str:
+    params: dict[str, str] = {}
+    if open_weights is not None:
+        params["open_weights"] = "true" if open_weights else "false"
+    if provider_jurisdiction:
+        params["provider[jurisdiction]"] = provider_jurisdiction
+    if provider_region:
+        params["provider[region]"] = provider_region
+    if not params:
+        return "/models"
+    return f"/models?{urlencode(params)}"
+
+
 # ---- sync client ---------------------------------------------------------
 
 
@@ -1149,12 +1168,25 @@ class TrustedRouter:
                 preset=preset,
             )
         )
-        return self.chat_completions(
-            model=FUSION_MODEL, messages=messages, tools=tools, **params
-        )
+        return self.chat_completions(model=FUSION_MODEL, messages=messages, tools=tools, **params)
 
-    def models(self) -> ModelList:
-        return ModelList.model_validate(self.request("GET", "/models"))
+    def models(
+        self,
+        *,
+        open_weights: bool | None = None,
+        provider_jurisdiction: str | None = None,
+        provider_region: str | None = None,
+    ) -> ModelList:
+        return ModelList.model_validate(
+            self.request(
+                "GET",
+                _models_path(
+                    open_weights=open_weights,
+                    provider_jurisdiction=provider_jurisdiction,
+                    provider_region=provider_region,
+                ),
+            )
+        )
 
     def providers(self) -> ProviderList:
         return ProviderList.model_validate(self.request("GET", "/providers"))
@@ -1969,8 +2001,23 @@ class AsyncTrustedRouter:
             model=FUSION_MODEL, messages=messages, tools=tools, **params
         )
 
-    async def models(self) -> ModelList:
-        return ModelList.model_validate(await self.request("GET", "/models"))
+    async def models(
+        self,
+        *,
+        open_weights: bool | None = None,
+        provider_jurisdiction: str | None = None,
+        provider_region: str | None = None,
+    ) -> ModelList:
+        return ModelList.model_validate(
+            await self.request(
+                "GET",
+                _models_path(
+                    open_weights=open_weights,
+                    provider_jurisdiction=provider_jurisdiction,
+                    provider_region=provider_region,
+                ),
+            )
+        )
 
     async def providers(self) -> ProviderList:
         return ProviderList.model_validate(await self.request("GET", "/providers"))

@@ -47,6 +47,52 @@ def test_request_sends_bearer_token() -> None:
     client.close()
 
 
+def test_models_accept_catalog_filters() -> None:
+    seen_url = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_url
+        seen_url = str(request.url)
+        return httpx.Response(200, json={"data": []})
+
+    client = TrustedRouter(api_key="sk-tr-test")
+    client._client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    assert (
+        client.models(
+            open_weights=True,
+            provider_jurisdiction="us",
+            provider_region="eu",
+        ).data
+        == []
+    )
+    assert seen_url == (
+        f"{DEFAULT_API_BASE_URL}/models?"
+        "open_weights=true&provider%5Bjurisdiction%5D=us&provider%5Bregion%5D=eu"
+    )
+    client.close()
+
+
+def test_async_models_accept_catalog_filters() -> None:
+    seen_url = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_url
+        seen_url = str(request.url)
+        return httpx.Response(200, json={"data": []})
+
+    async def run() -> None:
+        client = AsyncTrustedRouter(
+            api_key="sk-tr-test",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert (await client.models(open_weights=True, provider_region="eu")).data == []
+        await client._client.aclose()
+
+    asyncio.run(run())
+    assert seen_url == f"{DEFAULT_API_BASE_URL}/models?open_weights=true&provider%5Bregion%5D=eu"
+
+
 def test_auto_model_constant_and_region_provider_helpers() -> None:
     seen: list[tuple[str, str]] = []
 
@@ -114,9 +160,7 @@ def test_package_exports_fusion_presets_and_consistent_version() -> None:
     assert tool["type"] == "trustedrouter:fusion"
     assert tool["parameters"]["analysis_models"] == list(FUSION_FREEDOM_PANEL)
     assert tool["parameters"]["fallback_judges"] == list(FUSION_FREEDOM_FALLBACK_JUDGES)
-    assert tool["parameters"]["fallback_final_models"] == list(
-        FUSION_FREEDOM_FALLBACK_FINALS
-    )
+    assert tool["parameters"]["fallback_final_models"] == list(FUSION_FREEDOM_FALLBACK_FINALS)
     assert advisor_tool(max_get_advice_calls=1) == {
         "type": "trustedrouter:advisor",
         "parameters": {"max_get_advice_calls": 1},
@@ -217,10 +261,8 @@ def test_chat_completions_per_call_api_key_overrides_instance_key() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_auth.append(request.headers.get("authorization", ""))
-        body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' b"data: [DONE]\n\n"
-        return httpx.Response(
-            200, headers={"content-type": "text/event-stream"}, content=body
-        )
+        body = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
 
     client = TrustedRouter(api_key="instance-key")
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -231,9 +273,7 @@ def test_chat_completions_per_call_api_key_overrides_instance_key() -> None:
         )
     )
     list(
-        client.chat_completions_chunk_stream(
-            model="m", messages=[{"role": "user", "content": "x"}]
-        )
+        client.chat_completions_chunk_stream(model="m", messages=[{"role": "user", "content": "x"}])
     )
 
     assert seen_auth == ["Bearer override-key", "Bearer instance-key"]
