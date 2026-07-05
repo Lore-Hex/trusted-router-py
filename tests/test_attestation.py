@@ -116,6 +116,80 @@ def test_verify_happy_path_returns_attestation() -> None:
     assert d["image_digest"] == "sha256:abc123"
 
 
+def test_verify_tls_exporter_binding_accepts_distinct_fresh_nonce() -> None:
+    key = _gen_keypair()
+    jwks = {"keys": [_public_jwk(key)]}
+    exporter = bytes.fromhex("aa" * 32)
+    nonce = "bb" * 32
+    claims = _good_claims(nonce_hex=nonce)
+    assert isinstance(claims["eat_nonce"], list)
+    claims["eat_nonce"].append(exporter.hex())
+    jwt = _make_jwt(key, claims)
+
+    result = verify_gateway_attestation(
+        jwt,
+        policy=AttestationPolicy(),
+        nonce_hex=nonce,
+        tls_cert_der=_FAKE_CERT,
+        tls_exporter=exporter,
+        jwks=jwks,
+    )
+
+    assert result.nonce == nonce
+
+
+def test_verify_tls_exporter_binding_rejects_missing_exporter_nonce() -> None:
+    key = _gen_keypair()
+    exporter = bytes.fromhex("aa" * 32)
+    nonce = "bb" * 32
+    jwt = _make_jwt(key, _good_claims(nonce_hex=nonce))
+
+    with pytest.raises(AttestationVerificationError, match="TLS exporter binding"):
+        verify_gateway_attestation(
+            jwt,
+            policy=AttestationPolicy(),
+            nonce_hex=nonce,
+            tls_cert_der=_FAKE_CERT,
+            tls_exporter=exporter,
+            jwks={"keys": [_public_jwk(key)]},
+        )
+
+
+def test_verify_tls_exporter_binding_rejects_missing_fresh_nonce() -> None:
+    key = _gen_keypair()
+    exporter = bytes.fromhex("aa" * 32)
+    claims = _good_claims()
+    assert isinstance(claims["eat_nonce"], list)
+    claims["eat_nonce"].append(exporter.hex())
+    jwt = _make_jwt(key, claims)
+
+    with pytest.raises(AttestationVerificationError, match="fresh nonce required"):
+        verify_gateway_attestation(
+            jwt,
+            policy=AttestationPolicy(),
+            tls_cert_der=_FAKE_CERT,
+            tls_exporter=exporter,
+            jwks={"keys": [_public_jwk(key)]},
+        )
+
+
+def test_verify_tls_exporter_binding_rejects_single_slot_relay_closure() -> None:
+    key = _gen_keypair()
+    exporter = bytes.fromhex("aa" * 32)
+    claims = _good_claims(nonce_hex=exporter.hex())
+    jwt = _make_jwt(key, claims)
+
+    with pytest.raises(AttestationVerificationError, match="fresh nonce must differ"):
+        verify_gateway_attestation(
+            jwt,
+            policy=AttestationPolicy(),
+            nonce_hex=exporter.hex(),
+            tls_cert_der=_FAKE_CERT,
+            tls_exporter=exporter,
+            jwks={"keys": [_public_jwk(key)]},
+        )
+
+
 def test_verify_works_when_aud_is_a_string_not_a_list() -> None:
     """Per RFC 7519 `aud` may be string OR array — we accept both."""
     key = _gen_keypair()

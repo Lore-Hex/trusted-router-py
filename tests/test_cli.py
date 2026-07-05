@@ -246,3 +246,62 @@ def test_attest_verify_error_returns_code_1(
     rc = cli.main(["attest", "--verify"])
     assert rc == 1
     assert "no tls" in capsys.readouterr().err
+
+
+def test_attest_session_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("session mode must not fetch attestation over httpx")
+
+    class FakeAttestation:
+        cert_sha256 = "c" * 64
+        image_digest = "sha256:test"
+
+        def as_dict(self) -> dict[str, str]:
+            return {
+                "cert_sha256": self.cert_sha256,
+                "image_digest": self.image_digest,
+            }
+
+    class FakeConnection:
+        def shutdown(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeSession:
+        attestation = FakeAttestation()
+        connection = FakeConnection()
+        exporter = bytes.fromhex("ab" * 32)
+
+    def fake_verify_gateway_session(
+        *,
+        base_url: str,
+        policy: object,
+        connect_ip: str | None,
+    ) -> FakeSession:
+        assert base_url == "https://api.trustedrouter.com/v1"
+        assert policy == {"policy": "ok"}
+        assert connect_ip == "127.0.0.1"
+        return FakeSession()
+
+    def fake_fetch_attestation_again(session: FakeSession) -> FakeAttestation:
+        assert isinstance(session, FakeSession)
+        return FakeAttestation()
+
+    _patch_client(monkeypatch, handler)
+    import trustedrouter.attestation as attestation
+    import trustedrouter.session as session_mod
+
+    monkeypatch.setattr(attestation, "policy_from_trust_release", lambda: {"policy": "ok"})
+    monkeypatch.setattr(session_mod, "verify_gateway_session", fake_verify_gateway_session)
+    monkeypatch.setattr(session_mod, "fetch_attestation_again", fake_fetch_attestation_again)
+
+    rc = cli.main(["attest", "--session", "--connect-ip", "127.0.0.1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "attestation verified" in out
+    assert "follow-up /attestation stayed" in out

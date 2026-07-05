@@ -46,6 +46,8 @@ GCP_JWKS_URI = (
     "https://www.googleapis.com/service_accounts/v1/metadata/jwk/"
     "signer@confidentialspace-sign.iam.gserviceaccount.com"
 )
+EXPORTER_LABEL = b"EXPORTER-Channel-Binding"
+EXPORTER_LENGTH = 32
 
 
 class AttestationVerificationError(ValueError):
@@ -196,6 +198,7 @@ def _check_claims(
     policy: AttestationPolicy,
     nonce_hex: str | None,
     tls_cert_der: bytes | None,
+    tls_exporter: bytes | None,
 ) -> GatewayAttestation:
     """Validate every claim the policy requires. Raises on any mismatch.
     Returns a GatewayAttestation if everything checks out."""
@@ -251,6 +254,27 @@ def _check_claims(
                 f"nonce {nonce_hex!r} not present in JWT nonces {nonces!r}"
             )
         nonce_match = nonce_hex
+
+    if tls_exporter is not None:
+        if nonce_hex is None:
+            raise AttestationVerificationError(
+                "fresh nonce required with exporter binding"
+            )
+        exporter_hex = tls_exporter.hex()
+        # G6 binds the RFC 9266 TLS exporter and a caller fresh nonce into the
+        # same single nonce list. Requiring both, and requiring distinct values,
+        # closes the relay case where a proxy launders only the client exporter.
+        if _safe_eq(nonce_hex.lower(), exporter_hex):
+            raise AttestationVerificationError(
+                "fresh nonce must differ from TLS exporter binding"
+            )
+        if not any(
+            isinstance(nonce, str) and _safe_eq(nonce.lower(), exporter_hex)
+            for nonce in nonces
+        ):
+            raise AttestationVerificationError(
+                "TLS exporter binding not present in JWT nonces"
+            )
 
     # Cert binding: the gateway includes the SHA-256 hex of its TLS
     # leaf cert as a nonce-style claim too (`tls_cert_sha256` or
@@ -334,6 +358,7 @@ def verify_gateway_attestation(
     policy: AttestationPolicy,
     nonce_hex: str | None = None,
     tls_cert_der: bytes | None = None,
+    tls_exporter: bytes | None = None,
     jwks: Mapping[str, Any] | None = None,
     jwks_url: str = GCP_JWKS_URI,
 ) -> GatewayAttestation:
@@ -347,6 +372,9 @@ def verify_gateway_attestation(
     `tls_cert_der` is the DER bytes of the leaf cert from the live TLS
     connection — when provided, we re-derive its SHA-256 and require
     the JWT to commit to the same cert.
+    `tls_exporter` is the 32-byte RFC 9266 exporter from the same live
+    TLS session used to fetch `/attestation`; when provided, the JWT
+    must bind both that exporter and a distinct fresh `nonce_hex`.
 
     Pass `jwks=` to inject a pre-fetched JWKS dict (e.g. for offline
     verification or tests); otherwise the function fetches Google's
@@ -364,12 +392,15 @@ def verify_gateway_attestation(
         policy=policy,
         nonce_hex=nonce_hex,
         tls_cert_der=tls_cert_der,
+        tls_exporter=tls_exporter,
     )
 
 
 __all__ = [
     "AttestationPolicy",
     "AttestationVerificationError",
+    "EXPORTER_LABEL",
+    "EXPORTER_LENGTH",
     "GCP_ISSUER",
     "GCP_JWKS_URI",
     "GatewayAttestation",

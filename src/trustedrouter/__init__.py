@@ -79,6 +79,11 @@ from trustedrouter.oauth import (
     oauth_authorize_url,
     random_oauth_state,
 )
+from trustedrouter.session import (
+    GatewaySession,
+    fetch_attestation_again,
+    verify_gateway_session,
+)
 
 __version__ = "0.4.0"
 
@@ -116,6 +121,7 @@ __all__ = [
     "FUSION_FREEDOM_PANEL",
     "FUSION_MODEL",
     "GatewayAttestation",
+    "GatewaySession",
     "InternalError",
     "LogoutResponse",
     "MessageContentBlock",
@@ -153,8 +159,10 @@ __all__ = [
     "fetch_trust_release",
     "fetch_userinfo",
     "fetch_userinfo_async",
+    "fetch_attestation_again",
     "fusion_tool",
     "oauth_authorize_url",
     "random_oauth_state",
     "verify_gateway_attestation",
+    "verify_gateway_session",
 ]

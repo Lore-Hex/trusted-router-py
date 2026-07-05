@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-attestation = ["cryptography>=42"]
+attestation = ["pyopenssl>=22.0", "cryptography"]
 
 [project.urls]
 Homepage = "https://trustedrouter.com"
@@ -41,6 +41,7 @@ dev = [
   "pytest-asyncio>=0.24",
   "respx>=0.21",
   "cryptography>=42",
+  "pyopenssl>=22.0",
   "mypy>=1.14.0",
 ]
 
