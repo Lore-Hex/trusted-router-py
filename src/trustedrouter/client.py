@@ -31,7 +31,8 @@ from trustedrouter.models import (
     TrustRelease,
 )
 
-DEFAULT_API_BASE_URL = "https://api.quillrouter.com/v1"
+DEFAULT_API_BASE_URL = "https://api.trustedrouter.com/v1"
+DEFAULT_CONTROL_BASE_URL = "https://trustedrouter.com/v1"
 DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
 DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
@@ -229,30 +230,6 @@ def _move_orchestration_options_into_tools(
     return params
 
 
-# Region routing — see https://trust.trustedrouter.com for the live list.
-# Apex (`api.quillrouter.com`) is currently us-central1, so we treat the
-# us-central1 entry as an alias of the apex until a regional subdomain
-# for it is published.
-REGION_HOSTS: dict[str, str] = {
-    "us-central1": "api.quillrouter.com",
-    "us-east4": "api-us-east4.quillrouter.com",
-    "europe-west4": "api-europe-west4.quillrouter.com",
-}
-DEFAULT_FAILOVER_REGIONS = ("us-central1", "us-east4", "europe-west4")
-
-
-def region_base_url(region: str) -> str:
-    """Return the OpenAI-compatible /v1 base URL for a TrustedRouter region.
-
-    Raises ValueError if the region isn't in REGION_HOSTS — callers that
-    want to opt into an unpublished regional gateway should pass the full
-    `base_url=...` to the client constructor instead."""
-    if region not in REGION_HOSTS:
-        known = ", ".join(sorted(REGION_HOSTS))
-        raise ValueError(f"unknown TrustedRouter region {region!r}; known: {known}")
-    return f"https://{REGION_HOSTS[region]}/v1"
-
-
 def _user_agent() -> str:
     # Lazy: read __version__ from the installed package metadata so the
     # UA stays in sync with whatever PyPI has, without import-cycling on
@@ -298,7 +275,7 @@ class PermissionDeniedError(TrustedRouterError):
 
 
 class NotFoundError(TrustedRouterError):
-    """404 — the model, region, or resource doesn't exist."""
+    """404 — the model or resource doesn't exist."""
 
 
 class EndpointNotSupportedError(TrustedRouterError):
@@ -374,24 +351,20 @@ def _regional_failoverable(status_code: int) -> bool:
     return status_code in {502, 503, 504}
 
 
-def _regional_base_urls(
-    primary_base_url: str,
+def _inference_base_urls(primary_base_url: str) -> list[str]:
+    return [primary_base_url.rstrip("/")]
+
+
+def _retryable_stream_open_status(
+    status_code: int,
     *,
-    enabled: bool,
-    failover_regions: list[str] | tuple[str, ...] | None,
-) -> list[str]:
-    urls = [primary_base_url.rstrip("/")]
-    if not enabled:
-        return urls
-    for region in failover_regions or DEFAULT_FAILOVER_REGIONS:
-        candidate = region_base_url(region).rstrip("/")
-        if candidate not in urls:
-            urls.append(candidate)
-    return urls
+    regional_failover: bool,
+) -> bool:
+    return regional_failover and _regional_failoverable(status_code)
 
 
 def _transport_retry_error(exc: httpx.TransportError) -> InternalError:
-    return InternalError(503, f"TrustedRouter regional endpoint unavailable: {exc!s}")
+    return InternalError(503, f"TrustedRouter endpoint unavailable: {exc!s}")
 
 
 def _retry_sleep(attempt: int, *, retry_after: float | None) -> float:
@@ -806,46 +779,37 @@ class TrustedRouter:
         api_key: str | None = None,
         *,
         base_url: str | None = None,
-        region: str | None = None,
+        control_base_url: str | None = None,
         timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         headers: Mapping[str, str] | None = None,
         workspace_id: str | None = None,
         client: httpx.Client | None = None,
         max_retries: int = 2,
-        regional_failover: bool | None = None,
-        failover_regions: list[str] | tuple[str, ...] | None = None,
+        regional_failover: bool = True,
     ) -> None:
         """Sync TrustedRouter client.
 
-        Either pass `region="europe-west4"` (or another known region) for
-        a one-line regional pin, OR pass `base_url=...` for a custom
-        endpoint (e.g. a self-hosted gateway). Passing both is a
-        configuration error. With neither, the client uses the apex
-        `api.quillrouter.com/v1` (currently us-central1).
+        By default, inference calls use the apex `api.trustedrouter.com/v1`.
+        Catalog, account, billing, OAuth, and broadcast calls use
+        `control_base_url` instead. Pass `base_url=...` for a custom inference
+        endpoint, such as a self-hosted gateway.
 
         `max_retries` controls automatic retry of 429 / 5xx responses
         with exponential backoff + jitter. Set to 0 to disable retries
-        entirely (e.g. inside an outer retry loop)."""
-        explicit_endpoint = region is not None or base_url is not None
-        if region is not None and base_url is not None:
-            raise ValueError("pass region= OR base_url=, not both")
-        if region is not None:
-            base_url = region_base_url(region)
+        entirely (e.g. inside an outer retry loop).
+
+        `regional_failover` defaults on. The apex is a global load balancer;
+        failover is handled server-side, so the SDK re-requests the apex rather
+        than pinning per-region hosts."""
         if base_url is None:
             base_url = DEFAULT_API_BASE_URL
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.region = region
+        self.control_base_url = (control_base_url or DEFAULT_CONTROL_BASE_URL).rstrip("/")
         self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
-        failover_enabled = (
-            (not explicit_endpoint) if regional_failover is None else regional_failover
-        )
-        self._base_urls = _regional_base_urls(
-            self.base_url,
-            enabled=failover_enabled,
-            failover_regions=failover_regions,
-        )
+        self._regional_failover = bool(regional_failover)
+        self._base_urls = _inference_base_urls(self.base_url)
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -879,6 +843,7 @@ class TrustedRouter:
         workspace_id: str | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
+        _base_url: str | None = None,
     ) -> dict[str, Any]:
         merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
@@ -896,16 +861,17 @@ class TrustedRouter:
             kwargs["timeout"] = timeout
         # Retry 429 + 5xx with exponential backoff + jitter. Honors
         # Retry-After when present.
+        base_urls = [_base_url.rstrip("/")] if _base_url is not None else self._base_urls
         attempt = 0
         base_index = 0
         while True:
-            url = f"{self._base_urls[base_index]}/{path.lstrip('/')}"
+            url = f"{base_urls[base_index]}/{path.lstrip('/')}"
             try:
                 response = self._client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
                 if attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(base_urls) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -914,11 +880,19 @@ class TrustedRouter:
                 return _json_or_raise(response)
             if (
                 _regional_failoverable(response.status_code)
-                and base_index < len(self._base_urls) - 1
+                and base_index < len(base_urls) - 1
             ):
                 base_index += 1
             time.sleep(_retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers)))
             attempt += 1
+
+    def _control_request(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return self.request(method, path, _base_url=self.control_base_url, **kwargs)
 
     def _build_chat_request(
         self,
@@ -991,11 +965,12 @@ class TrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             response.read()
-                            base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1053,11 +1028,12 @@ class TrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             response.read()
-                            base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1113,11 +1089,12 @@ class TrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             response.read()
-                            base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1178,7 +1155,7 @@ class TrustedRouter:
         provider_region: str | None = None,
     ) -> ModelList:
         return ModelList.model_validate(
-            self.request(
+            self._control_request(
                 "GET",
                 _models_path(
                     open_weights=open_weights,
@@ -1189,14 +1166,14 @@ class TrustedRouter:
         )
 
     def providers(self) -> ProviderList:
-        return ProviderList.model_validate(self.request("GET", "/providers"))
+        return ProviderList.model_validate(self._control_request("GET", "/providers"))
 
     def regions(self) -> RegionList:
-        return RegionList.model_validate(self.request("GET", "/regions"))
+        return RegionList.model_validate(self._control_request("GET", "/regions"))
 
     def credits(self, *, workspace_id: str | None = None) -> CreditsBalance:
         return CreditsBalance.model_validate(
-            self.request("GET", "/credits", workspace_id=workspace_id)
+            self._control_request("GET", "/credits", workspace_id=workspace_id)
         )
 
     def embeddings(
@@ -1321,11 +1298,12 @@ class TrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             response.read()
-                            base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1385,11 +1363,12 @@ class TrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             response.read()
-                            base_index += 1
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1456,7 +1435,7 @@ class TrustedRouter:
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
         return CheckoutSession.model_validate(
-            self.request(
+            self._control_request(
                 "POST",
                 "/billing/checkout",
                 json=body,
@@ -1469,10 +1448,10 @@ class TrustedRouter:
         return self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
 
     def auth_session(self) -> AuthSession:
-        return AuthSession.model_validate(self.request("GET", "/auth/session"))
+        return AuthSession.model_validate(self._control_request("GET", "/auth/session"))
 
     def logout(self) -> LogoutResponse:
-        return LogoutResponse.model_validate(self.request("POST", "/auth/logout"))
+        return LogoutResponse.model_validate(self._control_request("POST", "/auth/logout"))
 
     def activity(self, **params: Any) -> ActivityList:
         """List recent generations for the authenticated key/workspace.
@@ -1480,10 +1459,12 @@ class TrustedRouter:
         None values are dropped from the query string."""
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
-        return ActivityList.model_validate(self.request("GET", f"/activity{suffix}"))
+        return ActivityList.model_validate(self._control_request("GET", f"/activity{suffix}"))
 
     def broadcast_destinations(self, *, workspace_id: str | None = None) -> dict[str, Any]:
-        return self.request("GET", "/broadcast/destinations", workspace_id=workspace_id)
+        return self._control_request(
+            "GET", "/broadcast/destinations", workspace_id=workspace_id
+        )
 
     def create_broadcast_destination(
         self,
@@ -1508,7 +1489,9 @@ class TrustedRouter:
             headers=headers,
             api_key=api_key,
         )
-        return self.request("POST", "/broadcast/destinations", json=body, workspace_id=workspace_id)
+        return self._control_request(
+            "POST", "/broadcast/destinations", json=body, workspace_id=workspace_id
+        )
 
     def get_broadcast_destination(
         self,
@@ -1516,7 +1499,7 @@ class TrustedRouter:
         *,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.request(
+        return self._control_request(
             "GET",
             f"/broadcast/destinations/{destination_id}",
             workspace_id=workspace_id,
@@ -1529,7 +1512,7 @@ class TrustedRouter:
         workspace_id: str | None = None,
         **patch: Any,
     ) -> dict[str, Any]:
-        return self.request(
+        return self._control_request(
             "PATCH",
             f"/broadcast/destinations/{destination_id}",
             json={key: value for key, value in patch.items() if value is not None},
@@ -1542,7 +1525,7 @@ class TrustedRouter:
         *,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.request(
+        return self._control_request(
             "DELETE",
             f"/broadcast/destinations/{destination_id}",
             workspace_id=workspace_id,
@@ -1554,7 +1537,7 @@ class TrustedRouter:
         *,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.request(
+        return self._control_request(
             "POST",
             f"/broadcast/destinations/{destination_id}/test",
             workspace_id=workspace_id,
@@ -1594,36 +1577,30 @@ class AsyncTrustedRouter:
         api_key: str | None = None,
         *,
         base_url: str | None = None,
-        region: str | None = None,
+        control_base_url: str | None = None,
         timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         headers: Mapping[str, str] | None = None,
         verify: bool | str = True,
         workspace_id: str | None = None,
         client: httpx.AsyncClient | None = None,
         max_retries: int = 2,
-        regional_failover: bool | None = None,
-        failover_regions: list[str] | tuple[str, ...] | None = None,
+        regional_failover: bool = True,
     ) -> None:
-        explicit_endpoint = region is not None or base_url is not None
-        if region is not None and base_url is not None:
-            raise ValueError("pass region= OR base_url=, not both")
-        if region is not None:
-            base_url = region_base_url(region)
+        """Async TrustedRouter client.
+
+        `regional_failover` defaults on. The apex is a global load balancer;
+        failover is handled server-side, so the SDK re-requests the apex rather
+        than pinning per-region hosts.
+        """
         if base_url is None:
             base_url = DEFAULT_API_BASE_URL
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.region = region
+        self.control_base_url = (control_base_url or DEFAULT_CONTROL_BASE_URL).rstrip("/")
         self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
-        failover_enabled = (
-            (not explicit_endpoint) if regional_failover is None else regional_failover
-        )
-        self._base_urls = _regional_base_urls(
-            self.base_url,
-            enabled=failover_enabled,
-            failover_regions=failover_regions,
-        )
+        self._regional_failover = bool(regional_failover)
+        self._base_urls = _inference_base_urls(self.base_url)
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -1660,6 +1637,7 @@ class AsyncTrustedRouter:
         workspace_id: str | None = None,
         idempotency_key: str | None = None,
         timeout: float | httpx.Timeout | None = None,
+        _base_url: str | None = None,
     ) -> dict[str, Any]:
         merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
@@ -1675,16 +1653,17 @@ class AsyncTrustedRouter:
         kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
         if timeout is not None:
             kwargs["timeout"] = timeout
+        base_urls = [_base_url.rstrip("/")] if _base_url is not None else self._base_urls
         attempt = 0
         base_index = 0
         while True:
-            url = f"{self._base_urls[base_index]}/{path.lstrip('/')}"
+            url = f"{base_urls[base_index]}/{path.lstrip('/')}"
             try:
                 response = await self._client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
                 if attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(base_urls) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1693,13 +1672,21 @@ class AsyncTrustedRouter:
                 return _json_or_raise(response)
             if (
                 _regional_failoverable(response.status_code)
-                and base_index < len(self._base_urls) - 1
+                and base_index < len(base_urls) - 1
             ):
                 base_index += 1
             await asyncio.sleep(
                 _retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers))
             )
             attempt += 1
+
+    async def _control_request(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return await self.request(method, path, _base_url=self.control_base_url, **kwargs)
 
     def _build_chat_request(
         self,
@@ -1767,11 +1754,12 @@ class AsyncTrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             await response.aread()
-                            base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1827,11 +1815,12 @@ class AsyncTrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             await response.aread()
-                            base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1886,11 +1875,12 @@ class AsyncTrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             await response.aread()
-                            base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1944,11 +1934,12 @@ class AsyncTrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             await response.aread()
-                            base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -2009,7 +2000,7 @@ class AsyncTrustedRouter:
         provider_region: str | None = None,
     ) -> ModelList:
         return ModelList.model_validate(
-            await self.request(
+            await self._control_request(
                 "GET",
                 _models_path(
                     open_weights=open_weights,
@@ -2020,14 +2011,14 @@ class AsyncTrustedRouter:
         )
 
     async def providers(self) -> ProviderList:
-        return ProviderList.model_validate(await self.request("GET", "/providers"))
+        return ProviderList.model_validate(await self._control_request("GET", "/providers"))
 
     async def regions(self) -> RegionList:
-        return RegionList.model_validate(await self.request("GET", "/regions"))
+        return RegionList.model_validate(await self._control_request("GET", "/regions"))
 
     async def credits(self, *, workspace_id: str | None = None) -> CreditsBalance:
         return CreditsBalance.model_validate(
-            await self.request("GET", "/credits", workspace_id=workspace_id)
+            await self._control_request("GET", "/credits", workspace_id=workspace_id)
         )
 
     async def embeddings(
@@ -2141,11 +2132,12 @@ class AsyncTrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             await response.aread()
-                            base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -2206,11 +2198,12 @@ class AsyncTrustedRouter:
                     if response.is_error:
                         if (
                             attempt < self.max_retries
-                            and _regional_failoverable(response.status_code)
-                            and base_index < len(self._base_urls) - 1
+                            and _retryable_stream_open_status(
+                                response.status_code,
+                                regional_failover=self._regional_failover,
+                            )
                         ):
                             await response.aread()
-                            base_index += 1
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -2275,7 +2268,7 @@ class AsyncTrustedRouter:
         if cancel_url is not None:
             body["cancel_url"] = cancel_url
         return CheckoutSession.model_validate(
-            await self.request(
+            await self._control_request(
                 "POST",
                 "/billing/checkout",
                 json=body,
@@ -2288,18 +2281,22 @@ class AsyncTrustedRouter:
         return await self.billing_checkout(amount=amount, payment_method="stablecoin", **params)
 
     async def auth_session(self) -> AuthSession:
-        return AuthSession.model_validate(await self.request("GET", "/auth/session"))
+        return AuthSession.model_validate(await self._control_request("GET", "/auth/session"))
 
     async def logout(self) -> LogoutResponse:
-        return LogoutResponse.model_validate(await self.request("POST", "/auth/logout"))
+        return LogoutResponse.model_validate(await self._control_request("POST", "/auth/logout"))
 
     async def activity(self, **params: Any) -> ActivityList:
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
-        return ActivityList.model_validate(await self.request("GET", f"/activity{suffix}"))
+        return ActivityList.model_validate(
+            await self._control_request("GET", f"/activity{suffix}")
+        )
 
     async def broadcast_destinations(self, *, workspace_id: str | None = None) -> dict[str, Any]:
-        return await self.request("GET", "/broadcast/destinations", workspace_id=workspace_id)
+        return await self._control_request(
+            "GET", "/broadcast/destinations", workspace_id=workspace_id
+        )
 
     async def create_broadcast_destination(
         self,
@@ -2324,7 +2321,7 @@ class AsyncTrustedRouter:
             headers=headers,
             api_key=api_key,
         )
-        return await self.request(
+        return await self._control_request(
             "POST",
             "/broadcast/destinations",
             json=body,
@@ -2337,7 +2334,7 @@ class AsyncTrustedRouter:
         *,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self.request(
+        return await self._control_request(
             "GET",
             f"/broadcast/destinations/{destination_id}",
             workspace_id=workspace_id,
@@ -2350,7 +2347,7 @@ class AsyncTrustedRouter:
         workspace_id: str | None = None,
         **patch: Any,
     ) -> dict[str, Any]:
-        return await self.request(
+        return await self._control_request(
             "PATCH",
             f"/broadcast/destinations/{destination_id}",
             json={key: value for key, value in patch.items() if value is not None},
@@ -2363,7 +2360,7 @@ class AsyncTrustedRouter:
         *,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self.request(
+        return await self._control_request(
             "DELETE",
             f"/broadcast/destinations/{destination_id}",
             workspace_id=workspace_id,
@@ -2375,7 +2372,7 @@ class AsyncTrustedRouter:
         *,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self.request(
+        return await self._control_request(
             "POST",
             f"/broadcast/destinations/{destination_id}/test",
             workspace_id=workspace_id,

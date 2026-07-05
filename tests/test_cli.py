@@ -115,15 +115,6 @@ def test_list_subcommands_hit_correct_paths(
     assert subcmd in capsys.readouterr().out
 
 
-def test_regions_invalid_choice_rejected_by_argparse(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(SystemExit):
-        cli.main(["--region", "mars", "regions"])
-    err = capsys.readouterr().err
-    assert "invalid choice" in err
-
-
 def test_unknown_subcommand_exits_nonzero() -> None:
     with pytest.raises(SystemExit):
         cli.main(["frobnicate"])
@@ -203,7 +194,7 @@ def test_attest_verify_success(
 
     class FakeSSLContext:
         def wrap_socket(self, _sock: object, *, server_hostname: str) -> FakeSSLSocket:
-            assert server_hostname == "api.quillrouter.com"
+            assert server_hostname == "api.trustedrouter.com"
             return FakeSSLSocket()
 
     class FakeResult:

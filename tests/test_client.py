@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json as jsonlib
-from importlib.metadata import version
+from pathlib import Path
 
 import httpx
 import pytest
@@ -11,6 +11,7 @@ from trustedrouter import (
     ADVISOR_MODEL,
     AUTO_MODEL,
     DEFAULT_API_BASE_URL,
+    DEFAULT_CONTROL_BASE_URL,
     DEFAULT_FUSION_TIMEOUT_SECONDS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     FAST_MODEL,
@@ -28,6 +29,14 @@ from trustedrouter import (
 from trustedrouter.client import TrustedRouterError
 
 
+def _pyproject_version() -> str:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    for line in pyproject.read_text(encoding="utf-8").splitlines():
+        if line.startswith("version = "):
+            return line.split('"', 2)[1]
+    raise AssertionError("pyproject.toml is missing project.version")
+
+
 def test_client_normalizes_base_url() -> None:
     client = TrustedRouter(base_url=DEFAULT_API_BASE_URL + "/")
     assert client.base_url == DEFAULT_API_BASE_URL
@@ -37,7 +46,7 @@ def test_client_normalizes_base_url() -> None:
 def test_request_sends_bearer_token() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["authorization"] == "Bearer sk-tr-test"
-        assert str(request.url) == f"{DEFAULT_API_BASE_URL}/models"
+        assert str(request.url) == f"{DEFAULT_CONTROL_BASE_URL}/models"
         return httpx.Response(200, json={"data": []})
 
     client = TrustedRouter(api_key="sk-tr-test")
@@ -67,7 +76,7 @@ def test_models_accept_catalog_filters() -> None:
         == []
     )
     assert seen_url == (
-        f"{DEFAULT_API_BASE_URL}/models?"
+        f"{DEFAULT_CONTROL_BASE_URL}/models?"
         "open_weights=true&provider%5Bjurisdiction%5D=us&provider%5Bregion%5D=eu"
     )
     client.close()
@@ -90,7 +99,10 @@ def test_async_models_accept_catalog_filters() -> None:
         await client._client.aclose()
 
     asyncio.run(run())
-    assert seen_url == f"{DEFAULT_API_BASE_URL}/models?open_weights=true&provider%5Bregion%5D=eu"
+    assert (
+        seen_url
+        == f"{DEFAULT_CONTROL_BASE_URL}/models?open_weights=true&provider%5Bregion%5D=eu"
+    )
 
 
 def test_auto_model_constant_and_region_provider_helpers() -> None:
@@ -116,21 +128,24 @@ def test_auto_model_constant_and_region_provider_helpers() -> None:
     assert client.regions().data[1].id == "europe-west4"
     assert client.providers().data[0].id == "vertex"
     assert seen == [
-        ("GET", f"{DEFAULT_API_BASE_URL}/regions"),
-        ("GET", f"{DEFAULT_API_BASE_URL}/providers"),
+        ("GET", f"{DEFAULT_CONTROL_BASE_URL}/regions"),
+        ("GET", f"{DEFAULT_CONTROL_BASE_URL}/providers"),
     ]
     client.close()
 
 
 def test_package_exports_fusion_presets_and_consistent_version() -> None:
-    assert __version__ == version("trusted-router-py")
+    assert __version__ == _pyproject_version()
     assert FUSION_MODEL == "trustedrouter/fusion"
     assert DEFAULT_REQUEST_TIMEOUT_SECONDS == 120.0
     assert DEFAULT_FUSION_TIMEOUT_SECONDS == 600.0
+    assert DEFAULT_API_BASE_URL == "https://api.trustedrouter.com/v1"
+    assert DEFAULT_CONTROL_BASE_URL == "https://trustedrouter.com/v1"
     assert "FUSION_FREEDOM_PANEL" in __all__
     assert "FUSION_FREEDOM_FALLBACK_JUDGES" in __all__
     assert "FUSION_FREEDOM_FALLBACK_FINALS" in __all__
     assert "DEFAULT_FUSION_TIMEOUT_SECONDS" in __all__
+    assert "DEFAULT_CONTROL_BASE_URL" in __all__
     assert "fusion_tool" in __all__
     assert "ADVISOR_MODEL" in __all__
     assert "advisor_tool" in __all__
@@ -184,13 +199,13 @@ def test_checkout_and_auth_helpers_send_expected_shapes() -> None:
 
     assert calls[0] == (
         "POST",
-        f"{DEFAULT_API_BASE_URL}/billing/checkout",
+        f"{DEFAULT_CONTROL_BASE_URL}/billing/checkout",
         {"amount": 25, "payment_method": "stablecoin", "workspace_id": "ws_1"},
     )
-    assert calls[1][1] == f"{DEFAULT_API_BASE_URL}/auth/session"
+    assert calls[1][1] == f"{DEFAULT_CONTROL_BASE_URL}/auth/session"
     assert calls[2] == (
         "POST",
-        f"{DEFAULT_API_BASE_URL}/auth/logout",
+        f"{DEFAULT_CONTROL_BASE_URL}/auth/logout",
         {},
     )
     client.close()

@@ -23,7 +23,6 @@ import sys
 
 from trustedrouter import (
     AUTO_MODEL,
-    REGION_HOSTS,
     AsyncTrustedRouter,
     AuthenticationError,
     TrustedRouter,
@@ -44,7 +43,6 @@ def _bearer() -> str | None:
 def _client(args: argparse.Namespace) -> TrustedRouter:
     return TrustedRouter(
         api_key=_bearer(),
-        region=args.region,
         max_retries=args.retries,
     )
 
@@ -168,11 +166,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trustedrouter",
         description=f"TrustedRouter CLI v{__version__}",
-    )
-    parser.add_argument(
-        "--region",
-        choices=sorted(REGION_HOSTS),
-        help="Pin to a specific region (default: apex/us-central1).",
     )
     parser.add_argument(
         "--retries",

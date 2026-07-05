@@ -1,6 +1,6 @@
-"""Coverage for the v0.2 feature set: typed errors, retries, region
-shortcut, per-call extras (headers/idempotency/timeout), embeddings,
-messages, User-Agent header, async activity()."""
+"""Coverage for the v0.2 feature set: typed errors, retries, apex failover,
+per-call extras (headers/idempotency/timeout), embeddings, messages,
+User-Agent header, async activity()."""
 
 from __future__ import annotations
 
@@ -23,50 +23,8 @@ from trustedrouter import (
     RateLimitError,
     TrustedRouter,
     TrustedRouterError,
-    region_base_url,
 )
 from trustedrouter.client import _retry_sleep, _user_agent
-
-# ---- region shortcut ----------------------------------------------------
-
-
-def test_region_base_url_known_regions() -> None:
-    assert region_base_url("europe-west4") == "https://api-europe-west4.quillrouter.com/v1"
-    assert region_base_url("us-east4") == "https://api-us-east4.quillrouter.com/v1"
-    assert region_base_url("us-central1") == "https://api.quillrouter.com/v1"
-
-
-def test_region_base_url_rejects_unknown_region() -> None:
-    with pytest.raises(ValueError, match="unknown TrustedRouter region"):
-        region_base_url("mars-1")
-
-
-def test_constructor_region_shortcut_sets_base_url() -> None:
-    sdk = TrustedRouter(region="europe-west4")
-    assert sdk.base_url == "https://api-europe-west4.quillrouter.com/v1"
-    assert sdk.region == "europe-west4"
-    sdk.close()
-
-
-def test_constructor_region_and_base_url_collision_is_an_error() -> None:
-    with pytest.raises(ValueError, match="OR base_url"):
-        TrustedRouter(region="us-central1", base_url="https://custom.example/v1")
-
-
-def test_async_constructor_region_shortcut() -> None:
-    async def run() -> None:
-        sdk = AsyncTrustedRouter(region="europe-west4")
-        assert sdk.region == "europe-west4"
-        assert sdk.base_url.endswith("api-europe-west4.quillrouter.com/v1")
-        await sdk.aclose()
-
-    asyncio.run(run())
-
-
-def test_async_constructor_region_collision() -> None:
-    with pytest.raises(ValueError, match="OR base_url"):
-        AsyncTrustedRouter(region="us-central1", base_url="https://x/v1")
-
 
 # ---- typed errors -------------------------------------------------------
 
@@ -247,7 +205,9 @@ def test_request_retries_on_5xx_then_gives_up() -> None:
     sdk.close()
 
 
-def test_request_fails_over_to_regional_endpoint_on_503(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_inference_request_failover_retries_apex_on_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
     seen_hosts: list[str] = []
 
@@ -262,13 +222,12 @@ def test_request_fails_over_to_regional_endpoint_on_503(monkeypatch: pytest.Monk
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
 
-    result = sdk.models()
+    result = sdk.embeddings(model="embed", input="hello")
 
     assert result.data == []
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
     sdk.close()
 
 
@@ -287,13 +246,62 @@ def test_request_transport_error_fails_over_then_raises(
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
     with pytest.raises(InternalError) as exc_info:
-        sdk.models()
+        sdk.embeddings(model="embed", input="hello")
     assert exc_info.value.status_code == 503
     assert calls["count"] == 2
     sdk.close()
+
+
+def test_control_request_retries_without_regional_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, json={"error": {"message": "control down"}})
+        return httpx.Response(200, json={"data": []})
+
+    sdk = TrustedRouter(
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_retries=1,
+        regional_failover=True,
+    )
+
+    assert sdk.models().data == []
+    assert seen_hosts == ["trustedrouter.com", "trustedrouter.com"]
+    sdk.close()
+
+
+def test_async_control_request_retries_without_regional_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        if len(seen_hosts) == 1:
+            return httpx.Response(503, json={"error": {"message": "control down"}})
+        return httpx.Response(200, json={"data": []})
+
+    async def run() -> None:
+        sdk = AsyncTrustedRouter(
+            api_key="k",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_retries=1,
+            regional_failover=True,
+        )
+        assert (await sdk.models()).data == []
+        await sdk._client.aclose()
+
+    asyncio.run(run())
+    assert seen_hosts == ["trustedrouter.com", "trustedrouter.com"]
 
 
 def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,13 +325,12 @@ def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.Monk
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
 
     assert list(
         sdk.chat_completions_stream(model="m", messages=[{"role": "user", "content": "x"}])
     ) == ["OK"]
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
     assert seen_idempotency_keys[0] is not None
     assert seen_idempotency_keys[0].startswith("tr-req-")
     assert seen_idempotency_keys == [seen_idempotency_keys[0], seen_idempotency_keys[0]]
@@ -352,12 +359,11 @@ def test_chat_stream_transport_error_before_response_retries_once(
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
     assert list(
         sdk.chat_completions_stream(model="m", messages=[{"role": "user", "content": "x"}])
     ) == ["ok"]
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
     sdk.close()
 
 
@@ -379,20 +385,21 @@ def test_max_retries_zero_disables_retry_loop_entirely() -> None:
     sdk.close()
 
 
-def test_4xx_other_than_429_is_not_retried() -> None:
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_4xx_other_than_429_is_not_retried(status: int) -> None:
     """We should not retry 400/401/403/404 — those won't change."""
     state = {"calls": 0}
 
     def handler(_request: httpx.Request) -> httpx.Response:
         state["calls"] += 1
-        return httpx.Response(401, json={"error": {"message": "x"}})
+        return httpx.Response(status, json={"error": {"message": "x"}})
 
     sdk = TrustedRouter(
         api_key="k",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=5,
     )
-    with pytest.raises(AuthenticationError):
+    with pytest.raises(TrustedRouterError):
         sdk.models()
     assert state["calls"] == 1
     sdk.close()
@@ -423,7 +430,7 @@ def test_async_request_retries_on_503() -> None:
     assert state["calls"] == 2
 
 
-def test_async_request_fails_over_to_regional_endpoint_on_503(
+def test_async_request_failover_retries_apex_on_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
@@ -441,14 +448,13 @@ def test_async_request_fails_over_to_regional_endpoint_on_503(
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             max_retries=1,
             regional_failover=True,
-            failover_regions=("europe-west4",),
         )
-        result = await sdk.models()
+        result = await sdk.embeddings(model="embed", input="hello")
         assert result.data == []
         await sdk._client.aclose()
 
     asyncio.run(run())
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
 
 
 def test_async_request_transport_error_fails_over_then_raises(
@@ -467,10 +473,9 @@ def test_async_request_transport_error_fails_over_then_raises(
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             max_retries=1,
             regional_failover=True,
-            failover_regions=("europe-west4",),
         )
         with pytest.raises(InternalError) as exc_info:
-            await sdk.models()
+            await sdk.embeddings(model="embed", input="hello")
         assert exc_info.value.status_code == 503
         await sdk._client.aclose()
 
@@ -843,14 +848,13 @@ def test_sync_responses_stream_fails_over_with_same_idempotency_key(
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
     events = list(sdk.responses_stream(input="ping"))
     sdk.close()
 
     assert events[0]["event"] == "response.completed"
-    assert seen[0][0] == "api.quillrouter.com"
-    assert seen[1][0] == "api-europe-west4.quillrouter.com"
+    assert seen[0][0] == "api.trustedrouter.com"
+    assert seen[1][0] == "api.trustedrouter.com"
     assert seen[0][1] is not None
     assert seen[0][1] == seen[1][1]
 
@@ -878,12 +882,11 @@ def test_sync_responses_raw_stream_passes_through_bytes_and_fails_over(
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
     raw = b"".join(sdk.responses_raw_stream(input="ping"))
     sdk.close()
 
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
     assert b"response.created" in raw
     assert b"[DONE]" in raw
 
@@ -926,10 +929,9 @@ def test_sync_responses_raw_stream_transport_error_fails_over(
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=1,
         regional_failover=True,
-        failover_regions=("europe-west4",),
     )
     assert b"response.completed" in b"".join(sdk.responses_raw_stream(input="ping"))
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
     sdk.close()
 
 
@@ -1150,7 +1152,6 @@ def test_async_chat_stream_and_chunk_stream_fail_over_before_first_byte(
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             max_retries=1,
             regional_failover=True,
-            failover_regions=("europe-west4",),
         )
         text = [
             token
@@ -1174,10 +1175,10 @@ def test_async_chat_stream_and_chunk_stream_fail_over_before_first_byte(
     assert text == ["OK"]
     assert chunk_count == 1
     assert [host for host, _ in seen] == [
-        "api.quillrouter.com",
-        "api-europe-west4.quillrouter.com",
-        "api.quillrouter.com",
-        "api-europe-west4.quillrouter.com",
+        "api.trustedrouter.com",
+        "api.trustedrouter.com",
+        "api.trustedrouter.com",
+        "api.trustedrouter.com",
     ]
     assert seen[0][1] == seen[1][1]
     assert seen[2][1] == seen[3][1]
@@ -1249,14 +1250,13 @@ def test_async_responses_raw_stream_regional_failover_and_error(
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             max_retries=1,
             regional_failover=True,
-            failover_regions=("europe-west4",),
         )
         raw = b"".join([chunk async for chunk in sdk.responses_raw_stream(input="ping")])
         await sdk._client.aclose()
         return raw
 
     assert b"response.created" in asyncio.run(ok())
-    assert seen_hosts == ["api.quillrouter.com", "api-europe-west4.quillrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
 
     def error_handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(501, json={"error": {"message": "nope"}})
@@ -1298,7 +1298,6 @@ def test_async_responses_stream_regional_failover_preserves_idempotency(
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             max_retries=1,
             regional_failover=True,
-            failover_regions=("europe-west4",),
         )
         events = [event async for event in sdk.responses_stream(input="ping")]
         await sdk._client.aclose()
@@ -1307,8 +1306,8 @@ def test_async_responses_stream_regional_failover_preserves_idempotency(
     events = asyncio.run(run())
 
     assert events[0]["event"] == "response.completed"
-    assert seen[0] == ("api.quillrouter.com", seen[0][1])
-    assert seen[1] == ("api-europe-west4.quillrouter.com", seen[0][1])
+    assert seen[0] == ("api.trustedrouter.com", seen[0][1])
+    assert seen[1] == ("api.trustedrouter.com", seen[0][1])
 
 
 def test_async_broadcast_destination_helpers() -> None:

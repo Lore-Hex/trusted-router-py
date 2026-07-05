@@ -39,7 +39,7 @@ import httpx
 
 from trustedrouter.client import (
     _DEFAULT_USER_AGENT,
-    DEFAULT_API_BASE_URL,
+    DEFAULT_CONTROL_BASE_URL,
     _classify_error,
     _retry_after_seconds,
 )
@@ -136,7 +136,7 @@ def _callback_url_with_state(callback_url: str, state: str) -> str:
 
 def oauth_authorize_url(
     *,
-    base_url: str = DEFAULT_API_BASE_URL,
+    base_url: str = DEFAULT_CONTROL_BASE_URL,
     callback_url: str,
     code_challenge: str | None = None,
     code_challenge_method: str | None = None,
@@ -189,7 +189,7 @@ def oauth_authorize_url(
 def create_oauth_authorization(
     *,
     callback_url: str,
-    base_url: str = DEFAULT_API_BASE_URL,
+    base_url: str = DEFAULT_CONTROL_BASE_URL,
     code_verifier: str | None = None,
     state: str | None = None,
     **opts: Any,
@@ -297,7 +297,7 @@ def exchange_oauth_key(
     code: str,
     code_verifier: str | None = None,
     code_challenge_method: str | None = None,
-    base_url: str = DEFAULT_API_BASE_URL,
+    base_url: str = DEFAULT_CONTROL_BASE_URL,
     client: httpx.Client | None = None,
     timeout: float = 30,
 ) -> OAuthToken:
@@ -321,7 +321,7 @@ async def exchange_oauth_key_async(
     code: str,
     code_verifier: str | None = None,
     code_challenge_method: str | None = None,
-    base_url: str = DEFAULT_API_BASE_URL,
+    base_url: str = DEFAULT_CONTROL_BASE_URL,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30,
 ) -> OAuthToken:
@@ -343,7 +343,7 @@ async def exchange_oauth_key_async(
 def fetch_userinfo(
     *,
     api_key: str,
-    base_url: str = DEFAULT_API_BASE_URL,
+    base_url: str = DEFAULT_CONTROL_BASE_URL,
     client: httpx.Client | None = None,
     timeout: float = 30,
 ) -> dict[str, Any]:
@@ -367,7 +367,7 @@ def fetch_userinfo(
 async def fetch_userinfo_async(
     *,
     api_key: str,
-    base_url: str = DEFAULT_API_BASE_URL,
+    base_url: str = DEFAULT_CONTROL_BASE_URL,
     client: httpx.AsyncClient | None = None,
     timeout: float = 30,
 ) -> dict[str, Any]:

@@ -18,7 +18,7 @@ import pytest
 import respx
 
 from trustedrouter import (
-    DEFAULT_API_BASE_URL,
+    DEFAULT_CONTROL_BASE_URL,
     AuthenticationError,
     BadRequestError,
     OAuthAuthorization,
@@ -90,7 +90,7 @@ def test_oauth_authorize_url_includes_only_set_params_and_embeds_state() -> None
         state="state-xyz",
     )
     parsed = httpx.URL(url)
-    assert str(parsed).startswith(f"{DEFAULT_API_BASE_URL}/auth?")
+    assert str(parsed).startswith(f"{DEFAULT_CONTROL_BASE_URL}/auth?")
     params = parsed.params
     assert params["code_challenge"] == "chal123"
     assert params["code_challenge_method"] == "S256"
@@ -208,7 +208,7 @@ def test_exchange_oauth_key_posts_to_keys_with_no_auth() -> None:
 
     req = seen[0]
     assert req.method == "POST"
-    assert str(req.url) == f"{DEFAULT_API_BASE_URL}/auth/keys"
+    assert str(req.url) == f"{DEFAULT_CONTROL_BASE_URL}/auth/keys"
     # Public client — must NOT carry an Authorization header.
     assert "authorization" not in {k.lower() for k in req.headers}
     body = jsonlib.loads(req.content.decode())
@@ -262,7 +262,7 @@ def test_exchange_oauth_key_async_posts_to_keys() -> None:
     assert token.key == "sk-tr-v1-async"
     assert token.user_id == "u2"
     assert token.identity is None
-    assert str(seen[0].url) == f"{DEFAULT_API_BASE_URL}/auth/keys"
+    assert str(seen[0].url) == f"{DEFAULT_CONTROL_BASE_URL}/auth/keys"
     assert "authorization" not in {k.lower() for k in seen[0].headers}
 
 
@@ -280,7 +280,7 @@ def test_fetch_userinfo_gets_with_bearer_and_unwraps_data() -> None:
     assert result == data
     req = seen[0]
     assert req.method == "GET"
-    assert str(req.url) == f"{DEFAULT_API_BASE_URL}/auth/userinfo"
+    assert str(req.url) == f"{DEFAULT_CONTROL_BASE_URL}/auth/userinfo"
     assert req.headers["authorization"] == "Bearer sk-tr-v1-key"
 
 
@@ -319,7 +319,7 @@ def test_fetch_userinfo_async_gets_with_bearer() -> None:
     result = _run(run())
     assert result == {"sub": "uu"}
     assert seen[0].headers["authorization"] == "Bearer sk-tr-v1-async"
-    assert str(seen[0].url) == f"{DEFAULT_API_BASE_URL}/auth/userinfo"
+    assert str(seen[0].url) == f"{DEFAULT_CONTROL_BASE_URL}/auth/userinfo"
 
 
 # ---- error-shape + plumbing edges -----------------------------------------
@@ -344,7 +344,7 @@ def test_exchange_oauth_key_maps_bare_message_error() -> None:
 
 @respx.mock
 def test_exchange_oauth_key_owned_client() -> None:
-    route = respx.post(f"{DEFAULT_API_BASE_URL}/auth/keys").mock(
+    route = respx.post(f"{DEFAULT_CONTROL_BASE_URL}/auth/keys").mock(
         return_value=httpx.Response(200, json={"key": "sk-tr-v1-owned", "user_id": "u9"})
     )
     token = exchange_oauth_key(code="c", code_verifier="v")
@@ -356,7 +356,7 @@ def test_exchange_oauth_key_owned_client() -> None:
 
 @respx.mock
 def test_fetch_userinfo_owned_client() -> None:
-    route = respx.get(f"{DEFAULT_API_BASE_URL}/auth/userinfo").mock(
+    route = respx.get(f"{DEFAULT_CONTROL_BASE_URL}/auth/userinfo").mock(
         return_value=httpx.Response(200, json={"data": {"sub": "owned"}})
     )
     result = fetch_userinfo(api_key="sk-tr-v1-owned")
@@ -366,7 +366,7 @@ def test_fetch_userinfo_owned_client() -> None:
 
 @respx.mock
 def test_exchange_oauth_key_async_owned_client() -> None:
-    respx.post(f"{DEFAULT_API_BASE_URL}/auth/keys").mock(
+    respx.post(f"{DEFAULT_CONTROL_BASE_URL}/auth/keys").mock(
         return_value=httpx.Response(200, json={"key": "sk-tr-v1-aowned", "user_id": "ua"})
     )
 
@@ -379,7 +379,7 @@ def test_exchange_oauth_key_async_owned_client() -> None:
 
 @respx.mock
 def test_fetch_userinfo_async_owned_client() -> None:
-    respx.get(f"{DEFAULT_API_BASE_URL}/auth/userinfo").mock(
+    respx.get(f"{DEFAULT_CONTROL_BASE_URL}/auth/userinfo").mock(
         return_value=httpx.Response(200, json={"data": {"sub": "aowned"}})
     )
 

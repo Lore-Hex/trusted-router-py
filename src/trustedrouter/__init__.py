@@ -7,6 +7,7 @@ from trustedrouter.client import (
     ADVISOR_MODEL,
     AUTO_MODEL,
     DEFAULT_API_BASE_URL,
+    DEFAULT_CONTROL_BASE_URL,
     DEFAULT_FUSION_TIMEOUT_SECONDS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_STATUS_URL,
@@ -16,7 +17,6 @@ from trustedrouter.client import (
     FUSION_FREEDOM_FALLBACK_JUDGES,
     FUSION_FREEDOM_PANEL,
     FUSION_MODEL,
-    REGION_HOSTS,
     AsyncTrustedRouter,
     AuthenticationError,
     BadRequestError,
@@ -30,7 +30,6 @@ from trustedrouter.client import (
     advisor_tool,
     fetch_trust_release,
     fusion_tool,
-    region_base_url,
 )
 from trustedrouter.models import (
     ActivityEvent,
@@ -81,7 +80,7 @@ from trustedrouter.oauth import (
     random_oauth_state,
 )
 
-__version__ = "0.3.4"
+__version__ = "0.4.0"
 
 __all__ = [
     "ActivityEvent",
@@ -103,6 +102,7 @@ __all__ = [
     "CheckoutSession",
     "CreditsBalance",
     "DEFAULT_API_BASE_URL",
+    "DEFAULT_CONTROL_BASE_URL",
     "DEFAULT_FUSION_TIMEOUT_SECONDS",
     "DEFAULT_REQUEST_TIMEOUT_SECONDS",
     "DEFAULT_STATUS_URL",
@@ -131,7 +131,6 @@ __all__ = [
     "PermissionDeniedError",
     "ProviderInfo",
     "ProviderList",
-    "REGION_HOSTS",
     "RateLimitError",
     "RegionInfo",
     "RegionList",
@@ -157,6 +156,5 @@ __all__ = [
     "fusion_tool",
     "oauth_authorize_url",
     "random_oauth_state",
-    "region_base_url",
     "verify_gateway_attestation",
 ]

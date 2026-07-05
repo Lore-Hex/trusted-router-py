@@ -12,7 +12,8 @@ the hosted, attested LLM router that lets you point one OpenAI-shaped client
 at every provider (Anthropic, OpenAI, Google Vertex, Gemini, DeepSeek,
 Mistral, Cerebras) and *prove* the prompt path doesn't log.
 
-- Gateway: `https://api.quillrouter.com/v1`
+- Inference API: `https://api.trustedrouter.com/v1`
+- Control API: `https://trustedrouter.com/v1`
 - Trust release: `https://trust.trustedrouter.com`
 - Source: `https://github.com/Lore-Hex/trusted-router-py`
 - License: Apache-2.0
@@ -112,18 +113,28 @@ async def main():
 asyncio.run(main())
 ```
 
-## Region pinning
+## Bases and failover
 
-The gateway is deployed in `us-central1` (the apex) and `europe-west4`. Pin
-to a specific region with one kwarg — no need to construct the URL yourself:
+Inference defaults to `https://api.trustedrouter.com/v1`, which is the global
+load-balancer apex. Regional failover re-requests that apex with the existing
+backoff; failover is handled server-side, and per-region hostnames are not used.
+
+Pass `base_url=` for a custom inference endpoint, such as a self-hosted gateway.
+`base_url` controls only inference-plane calls: chat completions, messages,
+responses, response input-token counting, embeddings, and attestation. Catalog,
+account, billing, broadcast, and OAuth calls use `control_base_url` instead,
+defaulting to `https://trustedrouter.com/v1`:
 
 ```python
-client = TrustedRouter(api_key="sk-tr-v1-...", region="europe-west4")
+client = TrustedRouter(
+    api_key="sk-tr-v1-...",
+    base_url="https://inference.internal/v1",
+    control_base_url="https://control.internal/v1",
+)
 ```
 
-The full list lives in `trustedrouter.REGION_HOSTS`. Pass `region=` for known
-regions, or `base_url=` for a custom endpoint (e.g. a self-hosted gateway).
-Passing both is a configuration error.
+Overriding `base_url` no longer changes `models()`, `providers()`, `regions()`,
+`credits()`, `activity()`, billing checkout, auth, OAuth, or broadcast calls.
 
 ## Typed errors
 
@@ -191,7 +202,8 @@ are billed to *that user's* credits. `create_oauth_authorization(...)` builds
 the authorize URL and returns the `code_verifier` + `state` to keep across the
 redirect; `exchange_oauth_key(...)` swaps the returned `code` for the delegated
 key + verified identity. Async variants (`exchange_oauth_key_async`,
-`fetch_userinfo_async`) mirror these.
+`fetch_userinfo_async`) mirror these. OAuth helpers default to the control API
+origin (`https://trustedrouter.com/v1`).
 
 ```python
 from trustedrouter import create_oauth_authorization, exchange_oauth_key, fetch_userinfo
@@ -238,8 +250,8 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
 
     # Bind the JWT to the live TLS connection's cert
     with ssl.create_default_context().wrap_socket(
-        socket.create_connection(("api.quillrouter.com", 443)),
-        server_hostname="api.quillrouter.com",
+        socket.create_connection(("api.trustedrouter.com", 443)),
+        server_hostname="api.trustedrouter.com",
     ) as s:
         cert_der = s.getpeercert(binary_form=True)
 
@@ -294,7 +306,6 @@ trustedrouter providers                    # list provider catalog
 trustedrouter models                       # list model catalog
 trustedrouter trust                        # show trust release
 trustedrouter attest                       # raw JWT bytes (pipe to `jq`-able tools)
-trustedrouter --region europe-west4 chat "hi"
 ```
 
 ## Other endpoints
@@ -313,6 +324,9 @@ client.messages(            # Anthropic-shape, preserves system + content blocks
 client.billing_checkout(amount=25, payment_method="stablecoin", idempotency_key=...)
 ```
 
+These catalog, account, billing, and broadcast helpers are control-plane calls
+and use `control_base_url`, not the inference `base_url`.
+
 `client.embeddings(...)` is present for API compatibility, but the hosted
 TrustedRouter route currently raises `EndpointNotSupportedError` instead of
 returning fake vectors. Use `client.models()` / `/embeddings/models` to inspect
@@ -330,7 +344,11 @@ client.request("GET", "/some/new/route", headers={"x-trace": "abc"})
   a typed model. Migration: replace `resp["k"]` with `resp.k`, or call
   `resp.model_dump()` to get the dict back. Models use `extra="allow"`
   so the gateway can add fields without an SDK release.
-- **v0.x:** AWS Nitro Enclaves attestation path (currently only GCP).
+- **v0.4 (shipped):** default inference host is
+  `https://api.trustedrouter.com/v1`; catalog/account/billing/OAuth/broadcast
+  calls use the control plane at `https://trustedrouter.com/v1` with a new
+  `control_base_url=` override.
+- **v0.x:** Regional failover improvements for the GCP Confidential Space path.
 
 ## Contributing
 
