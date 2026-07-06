@@ -20,6 +20,7 @@ import os
 import socket
 import ssl
 import sys
+from contextlib import suppress
 
 from trustedrouter import (
     AUTO_MODEL,
@@ -122,7 +123,36 @@ def _cmd_trust(_args: argparse.Namespace) -> int:
 
 def _cmd_attest(args: argparse.Namespace) -> int:
     client = _client(args)
+    session = None
     try:
+        if args.session:
+            from trustedrouter.attestation import policy_from_trust_release
+            from trustedrouter.session import (
+                fetch_attestation_again,
+                verify_gateway_session,
+            )
+
+            policy = policy_from_trust_release()
+            session = verify_gateway_session(
+                base_url=client.base_url,
+                policy=policy,
+                connect_ip=args.connect_ip,
+            )
+            print("[ok] attestation verified")
+            print(f"[ok] TLS cert SHA-256 {session.attestation.cert_sha256}")
+            print(f"[ok] image_digest {session.attestation.image_digest}")
+            print(f"[ok] TLS exporter bound ({session.exporter.hex()[:16]}...)")
+            followup = fetch_attestation_again(session)
+            print("[ok] follow-up /attestation stayed on the attested TLS socket")
+            _print(
+                {
+                    "attestation": session.attestation.as_dict(),
+                    "followup": followup.as_dict(),
+                    "exporter": session.exporter.hex(),
+                }
+            )
+            return 0
+
         doc = client.attestation()
         if not args.verify:
             sys.stdout.buffer.write(doc)
@@ -159,6 +189,11 @@ def _cmd_attest(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
+        if session is not None:
+            with suppress(Exception):
+                session.connection.shutdown()
+            with suppress(Exception):
+                session.connection.close()
         client.close()
 
 
@@ -195,6 +230,10 @@ def _build_parser() -> argparse.ArgumentParser:
     att.add_argument("--verify", action="store_true",
                      help="Verify against the trust release (requires "
                           "`pip install trusted-router-py[attestation]`).")
+    att.add_argument("--session", action="store_true",
+                     help="Verify the G6 TLS-exporter binding and keep-alive pin.")
+    att.add_argument("--connect-ip", default=None,
+                     help="Dial this IP while keeping the base-url host as SNI/Host.")
     att.set_defaults(func=_cmd_attest)
 
     return parser
