@@ -39,6 +39,30 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
 `chat_completions(...)` defaults to `AUTO_MODEL` when `model=` is omitted, so
 the simplest possible call is `client.chat_completions(messages=[...])`.
 
+## Cost allocation tags
+
+Attach up to 50 AWS-style string tags to an inference request. Tags stay out
+of prompts and provider payloads and appear on TrustedRouter generation and
+activity metadata.
+
+```python
+response = client.chat_completions(
+    model="trustedrouter/zdr",
+    messages=[{"role": "user", "content": "Summarize this contract."}],
+    tags={
+        "environment": "production",
+        "team": "legal",
+        "cost-center": "legal-01",
+    },
+    user="user_123",
+    session_id="matter_456",
+)
+```
+
+The same `tags`, `user`, `session_id`, and `trace` fields work with Responses,
+Messages, and Embeddings. Request tags override API key default tags with the
+same key.
+
 ## Fusion
 
 Fan a request across a panel of models and let a judge model pick or synthesize

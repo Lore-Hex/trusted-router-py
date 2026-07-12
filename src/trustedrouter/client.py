@@ -1184,6 +1184,9 @@ class TrustedRouter:
         encoding_format: str | None = None,
         dimensions: int | None = None,
         user: str | None = None,
+        session_id: str | None = None,
+        trace: Mapping[str, Any] | None = None,
+        tags: Mapping[str, str] | None = None,
     ) -> EmbeddingResponse:
         """OpenAI-compatible embeddings wrapper.
 
@@ -1199,6 +1202,12 @@ class TrustedRouter:
             body["dimensions"] = dimensions
         if user is not None:
             body["user"] = user
+        if session_id is not None:
+            body["session_id"] = session_id
+        if trace is not None:
+            body["trace"] = dict(trace)
+        if tags is not None:
+            body["tags"] = dict(tags)
         return EmbeddingResponse.model_validate(self.request("POST", "/embeddings", json=body))
 
     def messages(
@@ -2029,6 +2038,9 @@ class AsyncTrustedRouter:
         encoding_format: str | None = None,
         dimensions: int | None = None,
         user: str | None = None,
+        session_id: str | None = None,
+        trace: Mapping[str, Any] | None = None,
+        tags: Mapping[str, str] | None = None,
     ) -> EmbeddingResponse:
         body: dict[str, Any] = {"model": model, "input": input}
         if encoding_format is not None:
@@ -2037,6 +2049,12 @@ class AsyncTrustedRouter:
             body["dimensions"] = dimensions
         if user is not None:
             body["user"] = user
+        if session_id is not None:
+            body["session_id"] = session_id
+        if trace is not None:
+            body["trace"] = dict(trace)
+        if tags is not None:
+            body["tags"] = dict(tags)
         return EmbeddingResponse.model_validate(
             await self.request("POST", "/embeddings", json=body)
         )
