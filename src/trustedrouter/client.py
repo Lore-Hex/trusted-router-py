@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json as jsonlib
 import platform
 import random
 import secrets
 import sys
+import threading
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any
@@ -37,6 +39,12 @@ DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.j
 DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 DEFAULT_FUSION_TIMEOUT_SECONDS = 600.0
+DEFAULT_REGION_PROBE_TIMEOUT_SECONDS = 1.5
+REGION_BASE_URLS: tuple[str, ...] = (
+    "https://api-us-central1.quillrouter.com/v1",
+    "https://api-us-east4.quillrouter.com/v1",
+    "https://api-europe-west4.quillrouter.com/v1",
+)
 AUTO_MODEL = "trustedrouter/auto"
 FAST_MODEL = "trustedrouter/fast"
 FUSION_MODEL = "trustedrouter/fusion"
@@ -355,12 +363,109 @@ def _inference_base_urls(primary_base_url: str) -> list[str]:
     return [primary_base_url.rstrip("/")]
 
 
+def _region_candidates(primary_base_url: str) -> list[str]:
+    candidates = [*REGION_BASE_URLS, primary_base_url.rstrip("/")]
+    return list(dict.fromkeys(candidate.rstrip("/") for candidate in candidates))
+
+
+def _healthy_region_status(status_code: int) -> bool:
+    # 401 is accepted during the rolling transition from the former
+    # authenticated liveness path to the public, storage-free /health route.
+    return status_code in {200, 401}
+
+
+def _ordered_regions(primary_base_url: str, winner: str | None) -> list[str]:
+    primary = primary_base_url.rstrip("/")
+    if winner is None:
+        return [primary]
+    return list(dict.fromkeys([winner, primary, *_region_candidates(primary_base_url)]))
+
+
+def _select_regions_sync(
+    client: httpx.Client,
+    primary_base_url: str,
+    *,
+    timeout_seconds: float,
+) -> list[str]:
+    candidates = _region_candidates(primary_base_url)
+
+    def measure(base_url: str) -> tuple[float, str] | None:
+        started = time.perf_counter()
+        try:
+            response = client.get(
+                f"{base_url.rsplit('/v1', 1)[0]}/health",
+                timeout=timeout_seconds,
+            )
+        except httpx.HTTPError:
+            return None
+        if not _healthy_region_status(response.status_code):
+            return None
+        return (time.perf_counter() - started, base_url)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(candidates))
+    futures = [executor.submit(measure, base_url) for base_url in candidates]
+    winner: str | None = None
+    try:
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result is not None:
+                _latency, winner = result
+                break
+    finally:
+        for future in futures:
+            future.cancel()
+        # Running probes retain their own short HTTP timeout. Do not make the
+        # first inference wait for a slow region after a healthy winner exists.
+        executor.shutdown(wait=False, cancel_futures=True)
+    return _ordered_regions(primary_base_url, winner)
+
+
+async def _select_regions_async(
+    client: httpx.AsyncClient,
+    primary_base_url: str,
+    *,
+    timeout_seconds: float,
+) -> list[str]:
+    async def measure(base_url: str) -> tuple[float, str] | None:
+        started = time.perf_counter()
+        try:
+            response = await client.get(
+                f"{base_url.rsplit('/v1', 1)[0]}/health",
+                timeout=timeout_seconds,
+            )
+        except httpx.HTTPError:
+            return None
+        if not _healthy_region_status(response.status_code):
+            return None
+        return (time.perf_counter() - started, base_url)
+
+    tasks = [
+        asyncio.create_task(measure(base_url)) for base_url in _region_candidates(primary_base_url)
+    ]
+    winner: str | None = None
+    try:
+        for completed in asyncio.as_completed(tasks):
+            result = await completed
+            if result is not None:
+                _latency, winner = result
+                break
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return _ordered_regions(primary_base_url, winner)
+
+
 def _retryable_stream_open_status(
     status_code: int,
     *,
     regional_failover: bool,
 ) -> bool:
-    return regional_failover and _regional_failoverable(status_code)
+    # Streaming responses are still unopened at this point, so retrying has
+    # the same idempotency semantics as a normal request. Regional failover is
+    # handled separately: 429 and non-gateway 5xx back off on the pinned host.
+    del regional_failover
+    return _retryable(status_code)
 
 
 def _transport_retry_error(exc: httpx.TransportError) -> InternalError:
@@ -786,6 +891,8 @@ class TrustedRouter:
         client: httpx.Client | None = None,
         max_retries: int = 2,
         regional_failover: bool = True,
+        regional_affinity: bool | None = None,
+        region_probe_timeout: float = DEFAULT_REGION_PROBE_TIMEOUT_SECONDS,
     ) -> None:
         """Sync TrustedRouter client.
 
@@ -798,9 +905,13 @@ class TrustedRouter:
         with exponential backoff + jitter. Set to 0 to disable retries
         entirely (e.g. inside an outer retry loop).
 
-        `regional_failover` defaults on. The apex is a global load balancer;
-        failover is handled server-side, so the SDK re-requests the apex rather
-        than pinning per-region hosts."""
+        The default client probes published regional liveness endpoints once,
+        pins the lowest-latency healthy region, and retains the other regions
+        plus the apex for idempotent failover. Pass a custom `base_url` or set
+        `regional_affinity=False` to disable this selection."""
+        use_regional_affinity = base_url is None and (
+            client is None if regional_affinity is None else regional_affinity
+        )
         if base_url is None:
             base_url = DEFAULT_API_BASE_URL
         self.api_key = api_key
@@ -810,6 +921,9 @@ class TrustedRouter:
         self.max_retries = max(0, int(max_retries))
         self._regional_failover = bool(regional_failover)
         self._base_urls = _inference_base_urls(self.base_url)
+        self._regional_affinity_pending = bool(use_regional_affinity and self._regional_failover)
+        self._region_probe_timeout = max(0.1, float(region_probe_timeout))
+        self._region_lock = threading.Lock()
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -821,6 +935,7 @@ class TrustedRouter:
         else:
             self._client = httpx.Client(timeout=timeout, headers=default_headers)
             self._owns_client = True
+        self._region_client_identity = id(self._client)
 
     def close(self) -> None:
         if self._owns_client:
@@ -831,6 +946,31 @@ class TrustedRouter:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+    def _active_inference_base_urls(self) -> list[str]:
+        if id(self._client) != self._region_client_identity:
+            self._regional_affinity_pending = False
+        if not self._regional_affinity_pending:
+            return self._base_urls
+        with self._region_lock:
+            if self._regional_affinity_pending:
+                self._base_urls = _select_regions_sync(
+                    self._client,
+                    self.base_url,
+                    timeout_seconds=self._region_probe_timeout,
+                )
+                self._regional_affinity_pending = False
+        return self._base_urls
+
+    def _base_index_after_status(self, status_code: int, base_index: int) -> int:
+        base_urls = self._active_inference_base_urls()
+        if (
+            self._regional_failover
+            and _regional_failoverable(status_code)
+            and base_index < len(base_urls) - 1
+        ):
+            return base_index + 1
+        return base_index
 
     def request(
         self,
@@ -845,6 +985,12 @@ class TrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         _base_url: str | None = None,
     ) -> dict[str, Any]:
+        if (
+            idempotency_key is None
+            and _base_url is None
+            and method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        ):
+            idempotency_key = _new_idempotency_key()
         merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             merged_headers.update(headers)
@@ -861,7 +1007,9 @@ class TrustedRouter:
             kwargs["timeout"] = timeout
         # Retry 429 + 5xx with exponential backoff + jitter. Honors
         # Retry-After when present.
-        base_urls = [_base_url.rstrip("/")] if _base_url is not None else self._base_urls
+        base_urls = (
+            [_base_url.rstrip("/")] if _base_url is not None else self._active_inference_base_urls()
+        )
         attempt = 0
         base_index = 0
         while True:
@@ -878,10 +1026,7 @@ class TrustedRouter:
                 continue
             if attempt >= self.max_retries or not _retryable(response.status_code):
                 return _json_or_raise(response)
-            if (
-                _regional_failoverable(response.status_code)
-                and base_index < len(base_urls) - 1
-            ):
+            if _regional_failoverable(response.status_code) and base_index < len(base_urls) - 1:
                 base_index += 1
             time.sleep(_retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers)))
             attempt += 1
@@ -956,21 +1101,21 @@ class TrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=self._active_inference_base_urls()[base_index],
             )
             response_opened = False
             try:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             response.read()
+                            base_index = self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -987,7 +1132,7 @@ class TrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(self._active_inference_base_urls()) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1019,21 +1164,21 @@ class TrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=self._active_inference_base_urls()[base_index],
             )
             response_opened = False
             try:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             response.read()
+                            base_index = self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1048,7 +1193,7 @@ class TrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(self._active_inference_base_urls()) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1080,21 +1225,21 @@ class TrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=self._active_inference_base_urls()[base_index],
             )
             response_opened = False
             try:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             response.read()
+                            base_index = self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1108,7 +1253,7 @@ class TrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(self._active_inference_base_urls()) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1283,7 +1428,7 @@ class TrustedRouter:
         while True:
             req = _build_stream_request(
                 "POST",
-                f"{self._base_urls[base_index]}/responses",
+                f"{self._active_inference_base_urls()[base_index]}/responses",
                 body=body,
                 api_key=api_key if api_key is not None else self.api_key,
                 extra_headers=extra_headers,
@@ -1296,14 +1441,14 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             response.read()
+                            base_index = self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1317,7 +1462,7 @@ class TrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(self._active_inference_base_urls()) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1348,7 +1493,7 @@ class TrustedRouter:
         while True:
             req = _build_stream_request(
                 "POST",
-                f"{self._base_urls[base_index]}/responses",
+                f"{self._active_inference_base_urls()[base_index]}/responses",
                 body=body,
                 api_key=api_key if api_key is not None else self.api_key,
                 extra_headers=extra_headers,
@@ -1361,14 +1506,14 @@ class TrustedRouter:
                 with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             response.read()
+                            base_index = self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             time.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1382,7 +1527,7 @@ class TrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(self._active_inference_base_urls()) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1462,9 +1607,7 @@ class TrustedRouter:
         return ActivityList.model_validate(self._control_request("GET", f"/activity{suffix}"))
 
     def broadcast_destinations(self, *, workspace_id: str | None = None) -> dict[str, Any]:
-        return self._control_request(
-            "GET", "/broadcast/destinations", workspace_id=workspace_id
-        )
+        return self._control_request("GET", "/broadcast/destinations", workspace_id=workspace_id)
 
     def create_broadcast_destination(
         self,
@@ -1585,13 +1728,18 @@ class AsyncTrustedRouter:
         client: httpx.AsyncClient | None = None,
         max_retries: int = 2,
         regional_failover: bool = True,
+        regional_affinity: bool | None = None,
+        region_probe_timeout: float = DEFAULT_REGION_PROBE_TIMEOUT_SECONDS,
     ) -> None:
         """Async TrustedRouter client.
 
-        `regional_failover` defaults on. The apex is a global load balancer;
-        failover is handled server-side, so the SDK re-requests the apex rather
-        than pinning per-region hosts.
+        The default client probes regional liveness endpoints once and stays
+        pinned to the fastest healthy region. Custom `base_url` clients are
+        never probed or rewritten.
         """
+        use_regional_affinity = base_url is None and (
+            client is None if regional_affinity is None else regional_affinity
+        )
         if base_url is None:
             base_url = DEFAULT_API_BASE_URL
         self.api_key = api_key
@@ -1601,6 +1749,9 @@ class AsyncTrustedRouter:
         self.max_retries = max(0, int(max_retries))
         self._regional_failover = bool(regional_failover)
         self._base_urls = _inference_base_urls(self.base_url)
+        self._regional_affinity_pending = bool(use_regional_affinity and self._regional_failover)
+        self._region_probe_timeout = max(0.1, float(region_probe_timeout))
+        self._region_lock = asyncio.Lock()
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -1615,6 +1766,7 @@ class AsyncTrustedRouter:
                 timeout=timeout, headers=default_headers, verify=verify
             )
             self._owns_client = True
+        self._region_client_identity = id(self._client)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -1625,6 +1777,31 @@ class AsyncTrustedRouter:
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.aclose()
+
+    async def _active_inference_base_urls(self) -> list[str]:
+        if id(self._client) != self._region_client_identity:
+            self._regional_affinity_pending = False
+        if not self._regional_affinity_pending:
+            return self._base_urls
+        async with self._region_lock:
+            if self._regional_affinity_pending:
+                self._base_urls = await _select_regions_async(
+                    self._client,
+                    self.base_url,
+                    timeout_seconds=self._region_probe_timeout,
+                )
+                self._regional_affinity_pending = False
+        return self._base_urls
+
+    async def _base_index_after_status(self, status_code: int, base_index: int) -> int:
+        base_urls = await self._active_inference_base_urls()
+        if (
+            self._regional_failover
+            and _regional_failoverable(status_code)
+            and base_index < len(base_urls) - 1
+        ):
+            return base_index + 1
+        return base_index
 
     async def request(
         self,
@@ -1639,6 +1816,12 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         _base_url: str | None = None,
     ) -> dict[str, Any]:
+        if (
+            idempotency_key is None
+            and _base_url is None
+            and method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        ):
+            idempotency_key = _new_idempotency_key()
         merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             merged_headers.update(headers)
@@ -1653,7 +1836,11 @@ class AsyncTrustedRouter:
         kwargs: dict[str, Any] = {"json": json, "headers": merged_headers}
         if timeout is not None:
             kwargs["timeout"] = timeout
-        base_urls = [_base_url.rstrip("/")] if _base_url is not None else self._base_urls
+        base_urls = (
+            [_base_url.rstrip("/")]
+            if _base_url is not None
+            else await self._active_inference_base_urls()
+        )
         attempt = 0
         base_index = 0
         while True:
@@ -1670,10 +1857,7 @@ class AsyncTrustedRouter:
                 continue
             if attempt >= self.max_retries or not _retryable(response.status_code):
                 return _json_or_raise(response)
-            if (
-                _regional_failoverable(response.status_code)
-                and base_index < len(base_urls) - 1
-            ):
+            if _regional_failoverable(response.status_code) and base_index < len(base_urls) - 1:
                 base_index += 1
             await asyncio.sleep(
                 _retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers))
@@ -1745,21 +1929,21 @@ class AsyncTrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=(await self._active_inference_base_urls())[base_index],
             )
             response_opened = False
             try:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             await response.aread()
+                            base_index = await self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1776,7 +1960,7 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(await self._active_inference_base_urls()) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1806,21 +1990,21 @@ class AsyncTrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=(await self._active_inference_base_urls())[base_index],
             )
             response_opened = False
             try:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             await response.aread()
+                            base_index = await self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1835,7 +2019,7 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(await self._active_inference_base_urls()) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1866,21 +2050,21 @@ class AsyncTrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=(await self._active_inference_base_urls())[base_index],
             )
             response_opened = False
             try:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             await response.aread()
+                            base_index = await self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1895,7 +2079,7 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(await self._active_inference_base_urls()) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -1924,7 +2108,7 @@ class AsyncTrustedRouter:
                 extra_headers=extra_headers,
                 idempotency_key=request_idempotency_key,
                 timeout=timeout,
-                base_url=self._base_urls[base_index],
+                base_url=(await self._active_inference_base_urls())[base_index],
             )
             chunks: list[dict[str, Any]] = []
             response_opened = False
@@ -1932,14 +2116,14 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             await response.aread()
+                            base_index = await self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -1954,7 +2138,7 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(await self._active_inference_base_urls()) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -2117,7 +2301,7 @@ class AsyncTrustedRouter:
         while True:
             req = _build_stream_request(
                 "POST",
-                f"{self._base_urls[base_index]}/responses",
+                f"{(await self._active_inference_base_urls())[base_index]}/responses",
                 body=body,
                 api_key=api_key if api_key is not None else self.api_key,
                 extra_headers=extra_headers,
@@ -2130,14 +2314,14 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             await response.aread()
+                            base_index = await self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -2152,7 +2336,7 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(await self._active_inference_base_urls()) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -2183,7 +2367,7 @@ class AsyncTrustedRouter:
         while True:
             req = _build_stream_request(
                 "POST",
-                f"{self._base_urls[base_index]}/responses",
+                f"{(await self._active_inference_base_urls())[base_index]}/responses",
                 body=body,
                 api_key=api_key if api_key is not None else self.api_key,
                 extra_headers=extra_headers,
@@ -2196,14 +2380,14 @@ class AsyncTrustedRouter:
                 async with self._client.stream(**req) as response:
                     response_opened = True
                     if response.is_error:
-                        if (
-                            attempt < self.max_retries
-                            and _retryable_stream_open_status(
-                                response.status_code,
-                                regional_failover=self._regional_failover,
-                            )
+                        if attempt < self.max_retries and _retryable_stream_open_status(
+                            response.status_code,
+                            regional_failover=self._regional_failover,
                         ):
                             await response.aread()
+                            base_index = await self._base_index_after_status(
+                                response.status_code, base_index
+                            )
                             await asyncio.sleep(
                                 _retry_sleep(
                                     attempt, retry_after=_retry_after_seconds(response.headers)
@@ -2218,7 +2402,7 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if response_opened or attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(self._base_urls) - 1:
+                if base_index < len(await self._active_inference_base_urls()) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
@@ -2289,9 +2473,7 @@ class AsyncTrustedRouter:
     async def activity(self, **params: Any) -> ActivityList:
         query = httpx.QueryParams({k: v for k, v in params.items() if v is not None})
         suffix = f"?{query}" if query else ""
-        return ActivityList.model_validate(
-            await self._control_request("GET", f"/activity{suffix}")
-        )
+        return ActivityList.model_validate(await self._control_request("GET", f"/activity{suffix}"))
 
     async def broadcast_destinations(self, *, workspace_id: str | None = None) -> dict[str, Any]:
         return await self._control_request(

@@ -115,9 +115,17 @@ asyncio.run(main())
 
 ## Bases and failover
 
-Inference defaults to `https://api.trustedrouter.com/v1`, which is the global
-load-balancer apex. Regional failover re-requests that apex with the existing
-backoff; failover is handled server-side, and per-region hostnames are not used.
+Inference defaults to `https://api.trustedrouter.com/v1`. The default SDK client
+probes the published US Central, US East, and Europe gateway health endpoints in
+parallel on its first inference call, pins the lowest-latency healthy region for
+the life of that client, and keeps the remaining regions plus the global apex as
+idempotent failover targets. Reuse one client to preserve region affinity,
+connection pooling, DNS caching, and improve prompt-cache locality.
+
+Set `regional_affinity=False` to keep using only the global endpoint. A custom
+`base_url=` is never probed or rewritten. An injected `httpx` client also leaves
+affinity off by default; opt in explicitly with `regional_affinity=True` when
+the injected transport can reach the public regional hosts.
 
 Pass `base_url=` for a custom inference endpoint, such as a self-hosted gateway.
 `base_url` controls only inference-plane calls: chat completions, messages,
