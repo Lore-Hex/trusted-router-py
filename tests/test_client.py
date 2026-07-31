@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json as jsonlib
+import time
 from pathlib import Path
 
 import httpx
@@ -41,6 +42,198 @@ def test_client_normalizes_base_url() -> None:
     client = TrustedRouter(base_url=DEFAULT_API_BASE_URL + "/")
     assert client.base_url == DEFAULT_API_BASE_URL
     client.close()
+
+
+def test_sync_client_pins_fastest_healthy_region_once() -> None:
+    health_calls: list[str] = []
+    completed_health_calls: list[str] = []
+    health_at_first_inference: list[str] = []
+    inference_hosts: list[str] = []
+    delays = {
+        "api-us-central1.quillrouter.com": 0.012,
+        "api-us-east4.quillrouter.com": 0.002,
+        "api-europe-west4.quillrouter.com": 0.02,
+        "api.trustedrouter.com": 0.015,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if request.url.path == "/health":
+            health_calls.append(host)
+            time.sleep(delays[host])
+            completed_health_calls.append(host)
+            return httpx.Response(200, json={"status": "ok"})
+        if not inference_hosts:
+            health_at_first_inference.extend(completed_health_calls)
+        inference_hosts.append(host)
+        return httpx.Response(200, json={"data": {"ok": True}})
+
+    raw_client = httpx.Client(transport=httpx.MockTransport(handler))
+    sdk = TrustedRouter(client=raw_client, regional_affinity=True)
+    try:
+        assert sdk.request("POST", "/chat/completions", json={})["data"]["ok"] is True
+        assert sdk.request("POST", "/chat/completions", json={})["data"]["ok"] is True
+    finally:
+        raw_client.close()
+
+    assert len(health_calls) == 4
+    assert health_at_first_inference == ["api-us-east4.quillrouter.com"]
+    assert inference_hosts == [
+        "api-us-east4.quillrouter.com",
+        "api-us-east4.quillrouter.com",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_client_pins_fastest_region_and_keeps_idempotency_on_failover() -> None:
+    inference: list[tuple[str, str | None]] = []
+    delays = {
+        "api-us-central1.quillrouter.com": 0.01,
+        "api-us-east4.quillrouter.com": 0.001,
+        "api-europe-west4.quillrouter.com": 0.02,
+        "api.trustedrouter.com": 0.015,
+    }
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if request.url.path == "/health":
+            await asyncio.sleep(delays[host])
+            return httpx.Response(200, json={"status": "ok"})
+        inference.append((host, request.headers.get("idempotency-key")))
+        if len(inference) == 1:
+            return httpx.Response(503, json={"error": {"message": "region draining"}})
+        return httpx.Response(200, json={"data": {"ok": True}})
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    sdk = AsyncTrustedRouter(
+        client=raw_client,
+        regional_affinity=True,
+        max_retries=2,
+    )
+    try:
+        response = await sdk.request(
+            "POST",
+            "/chat/completions",
+            json={},
+        )
+    finally:
+        await raw_client.aclose()
+
+    assert response["data"]["ok"] is True
+    assert inference[0][0] == "api-us-east4.quillrouter.com"
+    assert inference[1][0] != inference[0][0]
+    assert inference[0][1] is not None
+    assert inference[0][1].startswith("tr-req-")
+    assert inference[1][1] == inference[0][1]
+
+
+def test_sync_stream_moves_regions_on_gateway_503_and_preserves_idempotency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inference: list[tuple[str, str | None]] = []
+    delays = {
+        "api-us-central1.quillrouter.com": 0.012,
+        "api-us-east4.quillrouter.com": 0.002,
+        "api-europe-west4.quillrouter.com": 0.02,
+        "api.trustedrouter.com": 0.015,
+    }
+    monkeypatch.setattr("trustedrouter.client.random.uniform", lambda _low, _high: 0.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if request.url.path == "/health":
+            time.sleep(delays[host])
+            return httpx.Response(200, json={"status": "ok"})
+        inference.append((host, request.headers.get("idempotency-key")))
+        if len(inference) == 1:
+            return httpx.Response(503, json={"error": {"message": "region draining"}})
+        body = b'data: {"choices":[{"delta":{"content":"PONG"}}]}\n\ndata: [DONE]\n\n'
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
+
+    raw_client = httpx.Client(transport=httpx.MockTransport(handler))
+    sdk = TrustedRouter(
+        client=raw_client,
+        regional_affinity=True,
+        max_retries=1,
+    )
+    try:
+        output = "".join(
+            sdk.chat_completions_stream(
+                model="trustedrouter/monitor",
+                messages=[{"role": "user", "content": "PING"}],
+                idempotency_key="stable-stream-retry",
+            )
+        )
+    finally:
+        raw_client.close()
+
+    assert output == "PONG"
+    assert inference[0][0] == "api-us-east4.quillrouter.com"
+    assert inference[1][0] != inference[0][0]
+    assert [key for _host, key in inference] == [
+        "stable-stream-retry",
+        "stable-stream-retry",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_async_stream_retries_429_on_pinned_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inference_hosts: list[str] = []
+    delays = {
+        "api-us-central1.quillrouter.com": 0.012,
+        "api-us-east4.quillrouter.com": 0.002,
+        "api-europe-west4.quillrouter.com": 0.02,
+        "api.trustedrouter.com": 0.015,
+    }
+    monkeypatch.setattr("trustedrouter.client.random.uniform", lambda _low, _high: 0.0)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if request.url.path == "/health":
+            await asyncio.sleep(delays[host])
+            return httpx.Response(200, json={"status": "ok"})
+        inference_hosts.append(host)
+        if len(inference_hosts) == 1:
+            return httpx.Response(
+                429,
+                headers={"retry-after": "0"},
+                json={"error": {"message": "provider busy"}},
+            )
+        body = b'data: {"choices":[{"delta":{"content":"PONG"}}]}\n\ndata: [DONE]\n\n'
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
+
+    raw_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    sdk = AsyncTrustedRouter(
+        client=raw_client,
+        regional_affinity=True,
+        max_retries=1,
+    )
+    try:
+        chunks = [
+            chunk
+            async for chunk in sdk.chat_completions_stream(
+                model="trustedrouter/monitor",
+                messages=[{"role": "user", "content": "PING"}],
+            )
+        ]
+    finally:
+        await raw_client.aclose()
+
+    assert chunks == ["PONG"]
+    assert inference_hosts == [
+        "api-us-east4.quillrouter.com",
+        "api-us-east4.quillrouter.com",
+    ]
 
 
 def test_request_sends_bearer_token() -> None:
@@ -100,8 +293,7 @@ def test_async_models_accept_catalog_filters() -> None:
 
     asyncio.run(run())
     assert (
-        seen_url
-        == f"{DEFAULT_CONTROL_BASE_URL}/models?open_weights=true&provider%5Bregion%5D=eu"
+        seen_url == f"{DEFAULT_CONTROL_BASE_URL}/models?open_weights=true&provider%5Bregion%5D=eu"
     )
 
 
