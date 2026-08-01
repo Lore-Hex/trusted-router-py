@@ -517,6 +517,10 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
                 "iss": GCP_ISSUER,
                 "aud": ["quill-cloud"],
                 "exp": int(time.time()) + 600,
+                "dbgstat": "disabled-since-boot",
+                "swname": "CONFIDENTIAL_SPACE",
+                "secboot": True,
+                "hwmodel": "GCP_AMD_SEV",
                 "submods": {
                     "container": {
                         "image_digest": "sha256:loopback",

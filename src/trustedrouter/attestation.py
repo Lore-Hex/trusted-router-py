@@ -65,6 +65,7 @@ class AttestationPolicy:
     expected_cert_sha256: str | None = None
     expected_image_digest: str | None = None
     expected_image_reference: str | None = None
+    allow_debug: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +205,9 @@ def _check_claims(
     Returns a GatewayAttestation if everything checks out."""
     now = int(time.time())
     exp = claims.get("exp")
-    if isinstance(exp, int) and exp <= now:
+    if not isinstance(exp, int) or isinstance(exp, bool):
+        raise AttestationVerificationError("JWT is missing a valid expiration")
+    if exp <= now:
         raise AttestationVerificationError(f"JWT expired at {exp} (now={now})")
 
     iss = claims.get("iss")
@@ -213,9 +216,35 @@ def _check_claims(
             f"unexpected issuer {iss!r}; expected {GCP_ISSUER}"
         )
 
+    if not policy.allow_debug and claims.get("dbgstat") != "disabled-since-boot":
+        raise AttestationVerificationError(
+            "debug Confidential Space workload must report disabled-since-boot"
+        )
+    if claims.get("swname") != "CONFIDENTIAL_SPACE":
+        raise AttestationVerificationError(
+            "attested workload is not running Confidential Space"
+        )
+    if claims.get("secboot") is not True:
+        raise AttestationVerificationError(
+            "attested workload does not report Secure Boot"
+        )
+    if claims.get("hwmodel") not in {
+        "GCP_AMD_SEV",
+        "GCP_AMD_SEV_ES",
+        "GCP_INTEL_TDX",
+    }:
+        raise AttestationVerificationError(
+            f"unsupported confidential hardware model {claims.get('hwmodel')!r}"
+        )
+
     aud = claims.get("aud")
     # `aud` may be a string OR a list per RFC 7519
-    aud_list = [aud] if isinstance(aud, str) else list(aud or [])
+    if isinstance(aud, str):
+        aud_list = [aud]
+    elif isinstance(aud, list) and all(isinstance(value, str) for value in aud):
+        aud_list = aud
+    else:
+        raise AttestationVerificationError("JWT aud must be a string or string list")
     if policy.gcp_audience not in aud_list:
         raise AttestationVerificationError(
             f"audience {policy.gcp_audience!r} not in JWT aud {aud_list!r}"
@@ -310,7 +339,7 @@ def _check_claims(
         image_digest=str(image_digest),
         image_reference=str(image_reference),
         nonce=nonce_match,
-        expires_at=int(exp) if isinstance(exp, int) else None,
+        expires_at=exp,
         issuer=str(iss) if iss else None,
         audience=policy.gcp_audience,
         raw_claims=dict(claims),
