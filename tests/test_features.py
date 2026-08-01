@@ -571,9 +571,13 @@ def test_chat_completions_preserves_explicit_idempotency_key() -> None:
         model="m",
         messages=[{"role": "user", "content": "hi"}],
         idempotency_key="caller-key-1",
+        tags={"team": "legal"},
+        session_id="matter_456",
     )
     assert seen[0][0] == "caller-key-1"
     assert "idempotency_key" not in seen[0][1]
+    assert seen[0][1]["tags"] == {"team": "legal"}
+    assert seen[0][1]["session_id"] == "matter_456"
     sdk.close()
 
 
@@ -690,6 +694,9 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         encoding_format="base64",
         dimensions=512,
         user="u_42",
+        session_id="matter_456",
+        trace={"source": "eval"},
+        tags={"team": "legal"},
     )
     sdk.close()
 
@@ -700,6 +707,9 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         "encoding_format": "base64",
         "dimensions": 512,
         "user": "u_42",
+        "session_id": "matter_456",
+        "trace": {"source": "eval"},
+        "tags": {"team": "legal"},
     }
 
 
@@ -741,12 +751,14 @@ def test_sync_messages_anthropic_shape() -> None:
         messages=[{"role": "user", "content": "hello"}],
         max_tokens=64,
         system="You are helpful.",
+        tags={"team": "legal"},
     )
     sdk.close()
 
     assert bodies[0]["max_tokens"] == 64
     assert bodies[0]["system"] == "You are helpful."
     assert bodies[0]["messages"][0]["role"] == "user"
+    assert bodies[0]["tags"] == {"team": "legal"}
 
 
 def test_sync_responses_wrapper_sends_workspace_header_not_body() -> None:
@@ -786,6 +798,9 @@ def test_sync_responses_wrapper_sends_workspace_header_not_body() -> None:
         workspace_id="ws_override",
         instructions="reply tersely",
         metadata={"source": "test"},
+        tags={"team": "legal"},
+        user="user-123",
+        session_id="matter-456",
     )
     sdk.close()
 
@@ -796,6 +811,9 @@ def test_sync_responses_wrapper_sends_workspace_header_not_body() -> None:
     assert seen[0][2]["model"] == AUTO_MODEL
     assert seen[0][2]["input"] == "ping"
     assert seen[0][2]["stream"] is False
+    assert seen[0][2]["tags"] == {"team": "legal"}
+    assert seen[0][2]["user"] == "user-123"
+    assert seen[0][2]["session_id"] == "matter-456"
     assert "workspace_id" not in seen[0][2]
 
 
