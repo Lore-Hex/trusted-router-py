@@ -39,6 +39,32 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
 `chat_completions(...)` defaults to `AUTO_MODEL` when `model=` is omitted, so
 the simplest possible call is `client.chat_completions(messages=[...])`.
 
+## Routing, privacy, and orchestration
+
+The SDK exports stable aliases for normal routing (`AUTO_MODEL`, `FAST_MODEL`),
+privacy (`ZDR_MODEL`, `E2E_MODEL`, `CONFIDENTIAL_MODEL`, `EU_MODEL`, `US_MODEL`),
+and named orchestration models such as `SOCRATES_MODEL`, `PROMETHEUS_MODEL`,
+`ZEUS_MODEL`, and `ATHENA_MODEL`.
+
+Use `ProviderPreferences` when privacy or US provider jurisdiction must be a
+hard routing requirement even with an explicit model. Use `EU_MODEL` for the
+EU-focused routing pool:
+
+```python
+from trustedrouter import ProviderPreferences
+
+response = client.chat_completions(
+    model="z-ai/glm-5.2",
+    messages=[{"role": "user", "content": "Review this contract."}],
+    provider=ProviderPreferences.confidential(),
+)
+```
+
+TrustedRouter's five atomic orchestration primitives have typed builders with
+the same wire format in every official SDK: `fusion_tool` (Synth),
+`advisor_tool`, `selector_tool`, `map_reduce_tool`, and `subagent_tool`.
+Named models are the easiest defaults; builders are for custom compositions.
+
 ## Cost allocation tags
 
 Attach up to 50 AWS-style string tags to an inference request. Tags stay out
@@ -195,6 +221,10 @@ except InternalError:
 
 All subclasses inherit from `TrustedRouterError`, so existing
 `except TrustedRouterError` blocks keep working.
+
+Every error also exposes `layer`, `source`, `provider`, and `request_id` when
+the server supplies them. These fields distinguish routing failures from
+provider errors without requiring callers to parse the message string.
 
 ## Automatic retries
 

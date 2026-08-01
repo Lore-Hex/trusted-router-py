@@ -20,6 +20,7 @@ from trustedrouter import (
     InternalError,
     NotFoundError,
     PermissionDeniedError,
+    ProviderPreferences,
     RateLimitError,
     TrustedRouter,
     TrustedRouterError,
@@ -697,6 +698,7 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         session_id="matter_456",
         trace={"source": "eval"},
         tags={"team": "legal"},
+        provider=ProviderPreferences.confidential(),
     )
     sdk.close()
 
@@ -710,6 +712,7 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         "session_id": "matter_456",
         "trace": {"source": "eval"},
         "tags": {"team": "legal"},
+        "provider": {"min_privacy": "confidential", "data_collection": "deny"},
     }
 
 

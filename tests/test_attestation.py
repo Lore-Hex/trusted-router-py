@@ -74,6 +74,10 @@ def _good_claims(*, nonce_hex: str | None = None) -> dict[str, object]:
         "iss": GCP_ISSUER,
         "aud": ["quill-cloud"],
         "exp": int(time.time()) + 600,
+        "dbgstat": "disabled-since-boot",
+        "swname": "CONFIDENTIAL_SPACE",
+        "secboot": True,
+        "hwmodel": "GCP_AMD_SEV",
         "submods": {
             "container": {
                 "image_digest": "sha256:abc123",
@@ -255,6 +259,61 @@ def test_expired_jwt_raises() -> None:
     claims["exp"] = int(time.time()) - 60  # expired a minute ago
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="expired"):
+        verify_gateway_attestation(
+            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+        )
+
+
+@pytest.mark.parametrize("exp", [None, "soon", True])
+def test_missing_or_invalid_expiration_raises(exp: object) -> None:
+    key = _gen_keypair()
+    claims = _good_claims()
+    if exp is None:
+        del claims["exp"]
+    else:
+        claims["exp"] = exp
+    jwt = _make_jwt(key, claims)
+    with pytest.raises(AttestationVerificationError, match="valid expiration"):
+        verify_gateway_attestation(
+            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+        )
+
+
+@pytest.mark.parametrize("field", ["dbgstat", "swname", "secboot", "hwmodel"])
+def test_production_attestation_claims_fail_closed(field: str) -> None:
+    key = _gen_keypair()
+    claims = _good_claims()
+    del claims[field]
+    jwt = _make_jwt(key, claims)
+    with pytest.raises(AttestationVerificationError):
+        verify_gateway_attestation(
+            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+        )
+
+
+def test_debug_attestation_requires_explicit_development_opt_out() -> None:
+    key = _gen_keypair()
+    claims = _good_claims()
+    claims["dbgstat"] = "enabled"
+    jwt = _make_jwt(key, claims)
+    with pytest.raises(AttestationVerificationError, match="disabled-since-boot"):
+        verify_gateway_attestation(
+            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+        )
+    result = verify_gateway_attestation(
+        jwt,
+        policy=AttestationPolicy(allow_debug=True),
+        jwks={"keys": [_public_jwk(key)]},
+    )
+    assert result.raw_claims["dbgstat"] == "enabled"
+
+
+def test_invalid_audience_shape_raises() -> None:
+    key = _gen_keypair()
+    claims = _good_claims()
+    claims["aud"] = {"quill-cloud": True}
+    jwt = _make_jwt(key, claims)
+    with pytest.raises(AttestationVerificationError, match="aud must"):
         verify_gateway_attestation(
             jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
         )
