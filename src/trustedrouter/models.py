@@ -335,7 +335,9 @@ class TrustRelease(_Base):
     source_repositories: dict[str, str] | None = None
     source_commit: str | None = None
     image_reference: str | None = None
+    accepted_image_references: list[str] = Field(default_factory=list)
     image_digest: str | None = None
+    accepted_image_digests: list[str] = Field(default_factory=list)
     attestation_issuer: str | None = None
     attestation_audience: str | None = None
     api_base_url: str | None = None
