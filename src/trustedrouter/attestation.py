@@ -21,6 +21,7 @@ an optional extra: `pip install trusted-router-py[attestation]`. The
 base SDK doesn't pull it because most users only want chat completions
 and shouldn't pay the install cost.
 """
+
 from __future__ import annotations
 
 import base64
@@ -64,7 +65,9 @@ class AttestationPolicy:
     gcp_audience: str = "quill-cloud"
     expected_cert_sha256: str | None = None
     expected_image_digest: str | None = None
+    expected_image_digests: tuple[str, ...] = ()
     expected_image_reference: str | None = None
+    expected_image_references: tuple[str, ...] = ()
     allow_debug: bool = False
 
 
@@ -109,15 +112,37 @@ def policy_from_trust_release(
     release_obj = release if release is not None else fetch_trust_release(trust_release_url)
     if isinstance(release_obj, TrustRelease):
         image_digest = release_obj.image_digest
+        accepted_image_digests = tuple(release_obj.accepted_image_digests)
         image_reference = release_obj.image_reference
+        accepted_image_references = tuple(release_obj.accepted_image_references)
     else:
         image_digest = str(release_obj.get("image_digest") or "") or None
+        accepted_raw = release_obj.get("accepted_image_digests")
+        accepted_image_digests = (
+            tuple(str(value) for value in accepted_raw if isinstance(value, str) and value)
+            if isinstance(accepted_raw, list)
+            else ()
+        )
         image_reference = str(release_obj.get("image_reference") or "") or None
+        accepted_references_raw = release_obj.get("accepted_image_references")
+        accepted_image_references = (
+            tuple(
+                str(value) for value in accepted_references_raw if isinstance(value, str) and value
+            )
+            if isinstance(accepted_references_raw, list)
+            else ()
+        )
+    if not accepted_image_digests and image_digest:
+        accepted_image_digests = (image_digest,)
+    if not accepted_image_references and image_reference:
+        accepted_image_references = (image_reference,)
     return AttestationPolicy(
         gcp_audience=audience,
         expected_cert_sha256=cert_sha256,
         expected_image_digest=image_digest,
+        expected_image_digests=accepted_image_digests,
         expected_image_reference=image_reference,
+        expected_image_references=accepted_image_references,
     )
 
 
@@ -135,9 +160,7 @@ def _jwt_split(token: bytes) -> tuple[dict[str, Any], dict[str, Any], bytes, byt
     text = token.decode("ascii", errors="replace").strip()
     parts = text.split(".")
     if len(parts) != 3:
-        raise AttestationVerificationError(
-            f"expected 3 JWT segments, got {len(parts)}"
-        )
+        raise AttestationVerificationError(f"expected 3 JWT segments, got {len(parts)}")
     h_b64, p_b64, s_b64 = parts
     try:
         header = json.loads(_b64url_decode(h_b64))
@@ -149,8 +172,9 @@ def _jwt_split(token: bytes) -> tuple[dict[str, Any], dict[str, Any], bytes, byt
     return header, payload, signing_input, signature
 
 
-def _verify_rs256(jwks: Mapping[str, Any], header: Mapping[str, Any],
-                  signing_input: bytes, signature: bytes) -> None:
+def _verify_rs256(
+    jwks: Mapping[str, Any], header: Mapping[str, Any], signing_input: bytes, signature: bytes
+) -> None:
     """Find the matching JWK by `kid`, build an RSA public key, verify
     the RS256 signature. Raises AttestationVerificationError on any
     mismatch or unsupported parameter."""
@@ -212,22 +236,16 @@ def _check_claims(
 
     iss = claims.get("iss")
     if iss != GCP_ISSUER:
-        raise AttestationVerificationError(
-            f"unexpected issuer {iss!r}; expected {GCP_ISSUER}"
-        )
+        raise AttestationVerificationError(f"unexpected issuer {iss!r}; expected {GCP_ISSUER}")
 
     if not policy.allow_debug and claims.get("dbgstat") != "disabled-since-boot":
         raise AttestationVerificationError(
             "debug Confidential Space workload must report disabled-since-boot"
         )
     if claims.get("swname") != "CONFIDENTIAL_SPACE":
-        raise AttestationVerificationError(
-            "attested workload is not running Confidential Space"
-        )
+        raise AttestationVerificationError("attested workload is not running Confidential Space")
     if claims.get("secboot") is not True:
-        raise AttestationVerificationError(
-            "attested workload does not report Secure Boot"
-        )
+        raise AttestationVerificationError("attested workload does not report Secure Boot")
     if claims.get("hwmodel") not in {
         "GCP_AMD_SEV",
         "GCP_AMD_SEV_ES",
@@ -254,19 +272,24 @@ def _check_claims(
     image_digest = submods.get("image_digest") or ""
     image_reference = submods.get("image_reference") or ""
 
-    if policy.expected_image_digest and not _safe_eq(
-        image_digest, policy.expected_image_digest
+    accepted_image_digests = policy.expected_image_digests
+    if not accepted_image_digests and policy.expected_image_digest:
+        accepted_image_digests = (policy.expected_image_digest,)
+    if accepted_image_digests and not any(
+        _safe_eq(image_digest, expected) for expected in accepted_image_digests
     ):
         raise AttestationVerificationError(
-            f"image_digest mismatch: workload={image_digest!r}, "
-            f"policy={policy.expected_image_digest!r}"
+            f"image_digest mismatch: workload={image_digest!r}, policy={accepted_image_digests!r}"
         )
-    if policy.expected_image_reference and not _safe_eq(
-        image_reference, policy.expected_image_reference
+    accepted_image_references = policy.expected_image_references
+    if not accepted_image_references and policy.expected_image_reference:
+        accepted_image_references = (policy.expected_image_reference,)
+    if accepted_image_references and not any(
+        _safe_eq(image_reference, expected) for expected in accepted_image_references
     ):
         raise AttestationVerificationError(
             f"image_reference mismatch: workload={image_reference!r}, "
-            f"policy={policy.expected_image_reference!r}"
+            f"policy={accepted_image_references!r}"
         )
 
     # Nonce binding: the gateway echoes the caller-supplied nonce in
@@ -286,24 +309,17 @@ def _check_claims(
 
     if tls_exporter is not None:
         if nonce_hex is None:
-            raise AttestationVerificationError(
-                "fresh nonce required with exporter binding"
-            )
+            raise AttestationVerificationError("fresh nonce required with exporter binding")
         exporter_hex = tls_exporter.hex()
         # G6 binds the RFC 9266 TLS exporter and a caller fresh nonce into the
         # same single nonce list. Requiring both, and requiring distinct values,
         # closes the relay case where a proxy launders only the client exporter.
         if _safe_eq(nonce_hex.lower(), exporter_hex):
-            raise AttestationVerificationError(
-                "fresh nonce must differ from TLS exporter binding"
-            )
+            raise AttestationVerificationError("fresh nonce must differ from TLS exporter binding")
         if not any(
-            isinstance(nonce, str) and _safe_eq(nonce.lower(), exporter_hex)
-            for nonce in nonces
+            isinstance(nonce, str) and _safe_eq(nonce.lower(), exporter_hex) for nonce in nonces
         ):
-            raise AttestationVerificationError(
-                "TLS exporter binding not present in JWT nonces"
-            )
+            raise AttestationVerificationError("TLS exporter binding not present in JWT nonces")
 
     # Cert binding: the gateway includes the SHA-256 hex of its TLS
     # leaf cert as a nonce-style claim too (`tls_cert_sha256` or
@@ -327,12 +343,8 @@ def _check_claims(
                 f"TLS cert mismatch: connection={actual!r}, JWT={cert_sha!r}"
             )
 
-    if policy.expected_cert_sha256 and not _safe_eq(
-        cert_sha, policy.expected_cert_sha256.lower()
-    ):
-        raise AttestationVerificationError(
-            "JWT-committed cert SHA-256 doesn't match policy pin"
-        )
+    if policy.expected_cert_sha256 and not _safe_eq(cert_sha, policy.expected_cert_sha256.lower()):
+        raise AttestationVerificationError("JWT-committed cert SHA-256 doesn't match policy pin")
 
     return GatewayAttestation(
         cert_sha256=cert_sha,
@@ -372,9 +384,7 @@ def _fetch_jwks(url: str = GCP_JWKS_URI, *, timeout: float = 10.0) -> dict[str, 
         response.raise_for_status()
         data = response.json()
     if not isinstance(data, dict) or "keys" not in data:
-        raise AttestationVerificationError(
-            f"GCP JWKS at {url} returned unexpected shape"
-        )
+        raise AttestationVerificationError(f"GCP JWKS at {url} returned unexpected shape")
     return data
 
 

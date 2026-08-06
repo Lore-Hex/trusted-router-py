@@ -9,6 +9,7 @@ mismatch we want to fail loudly on.
 This means the tests do real RS256 signature verification — no
 mocking of the crypto path, which is exactly the surface area we
 care about being correct."""
+
 from __future__ import annotations
 
 import base64
@@ -211,16 +212,12 @@ def test_verify_works_when_aud_is_a_string_not_a_list() -> None:
 
 def test_malformed_jwt_raises() -> None:
     with pytest.raises(AttestationVerificationError, match="3 JWT segments"):
-        verify_gateway_attestation(
-            b"only.two", policy=AttestationPolicy(), jwks={"keys": []}
-        )
+        verify_gateway_attestation(b"only.two", policy=AttestationPolicy(), jwks={"keys": []})
 
 
 def test_bad_base64_in_jwt_raises() -> None:
     with pytest.raises(AttestationVerificationError, match="invalid JWT"):
-        verify_gateway_attestation(
-            b"!!!.???.@@@", policy=AttestationPolicy(), jwks={"keys": []}
-        )
+        verify_gateway_attestation(b"!!!.???.@@@", policy=AttestationPolicy(), jwks={"keys": []})
 
 
 def test_unsupported_alg_raises() -> None:
@@ -387,7 +384,9 @@ def test_missing_cert_binding_raises() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="TLS cert"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), tls_cert_der=_FAKE_CERT,
+            jwt,
+            policy=AttestationPolicy(),
+            tls_cert_der=_FAKE_CERT,
             jwks={"keys": [_public_jwk(key)]},
         )
 
@@ -403,7 +402,9 @@ def test_jwt_cert_sha_mismatch_with_actual_tls_cert_raises() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="TLS cert mismatch"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), tls_cert_der=_FAKE_CERT,
+            jwt,
+            policy=AttestationPolicy(),
+            tls_cert_der=_FAKE_CERT,
             jwks={"keys": [_public_jwk(key)]},
         )
 
@@ -416,7 +417,9 @@ def test_policy_pin_overrides_runtime_when_set() -> None:
     policy = AttestationPolicy(expected_cert_sha256="0" * 64)
     with pytest.raises(AttestationVerificationError, match="policy pin"):
         verify_gateway_attestation(
-            jwt, policy=policy, tls_cert_der=_FAKE_CERT,
+            jwt,
+            policy=policy,
+            tls_cert_der=_FAKE_CERT,
             jwks={"keys": [_public_jwk(key)]},
         )
 
@@ -427,11 +430,21 @@ def test_policy_pin_overrides_runtime_when_set() -> None:
 def test_policy_from_trust_release_pulls_digest_and_reference() -> None:
     release = {
         "image_digest": "sha256:beef",
+        "accepted_image_digests": ["sha256:old", "sha256:beef"],
         "image_reference": "us-central1-docker.pkg.dev/p/r/i:tag",
+        "accepted_image_references": [
+            "us-central1-docker.pkg.dev/p/r/i:old",
+            "us-central1-docker.pkg.dev/p/r/i:tag",
+        ],
     }
     policy = policy_from_trust_release(release=release)
     assert policy.expected_image_digest == "sha256:beef"
+    assert policy.expected_image_digests == ("sha256:old", "sha256:beef")
     assert policy.expected_image_reference == "us-central1-docker.pkg.dev/p/r/i:tag"
+    assert policy.expected_image_references == (
+        "us-central1-docker.pkg.dev/p/r/i:old",
+        "us-central1-docker.pkg.dev/p/r/i:tag",
+    )
     assert policy.gcp_audience == "quill-cloud"
 
 
@@ -440,4 +453,34 @@ def test_policy_from_trust_release_handles_missing_fields() -> None:
     are None — verifier will skip those checks."""
     policy = policy_from_trust_release(release={})
     assert policy.expected_image_digest is None
+    assert policy.expected_image_digests == ()
     assert policy.expected_image_reference is None
+    assert policy.expected_image_references == ()
+
+
+def test_rollout_policy_accepts_each_published_image_and_rejects_other() -> None:
+    key = _gen_keypair()
+    jwks = {"keys": [_public_jwk(key)]}
+    policy = policy_from_trust_release(
+        release={
+            "image_digest": "sha256:new",
+            "accepted_image_digests": ["sha256:abc123", "sha256:new"],
+            "image_reference": "us-central1-docker.pkg.dev/proj/repo/img:new",
+            "accepted_image_references": [
+                "us-central1-docker.pkg.dev/proj/repo/img:tag",
+                "us-central1-docker.pkg.dev/proj/repo/img:new",
+            ],
+        }
+    )
+
+    result = verify_gateway_attestation(_make_jwt(key, _good_claims()), policy=policy, jwks=jwks)
+    assert result.image_digest == "sha256:abc123"
+
+    rejected = _good_claims()
+    container = rejected["submods"]
+    assert isinstance(container, dict)
+    nested = container["container"]
+    assert isinstance(nested, dict)
+    nested["image_digest"] = "sha256:other"
+    with pytest.raises(AttestationVerificationError, match="image_digest mismatch"):
+        verify_gateway_attestation(_make_jwt(key, rejected), policy=policy, jwks=jwks)
