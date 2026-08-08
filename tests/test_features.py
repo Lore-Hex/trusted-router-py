@@ -228,7 +228,7 @@ def test_inference_request_failover_retries_apex_on_503(
     result = sdk.embeddings(model="embed", input="hello")
 
     assert result.data == []
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
     sdk.close()
 
 
@@ -331,7 +331,7 @@ def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.Monk
     assert list(
         sdk.chat_completions_stream(model="m", messages=[{"role": "user", "content": "x"}])
     ) == ["OK"]
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
     assert seen_idempotency_keys[0] is not None
     assert seen_idempotency_keys[0].startswith("tr-req-")
     assert seen_idempotency_keys == [seen_idempotency_keys[0], seen_idempotency_keys[0]]
@@ -364,7 +364,7 @@ def test_chat_stream_transport_error_before_response_retries_once(
     assert list(
         sdk.chat_completions_stream(model="m", messages=[{"role": "user", "content": "x"}])
     ) == ["ok"]
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
     sdk.close()
 
 
@@ -455,7 +455,7 @@ def test_async_request_failover_retries_apex_on_503(
         await sdk._client.aclose()
 
     asyncio.run(run())
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
 
 
 def test_async_request_transport_error_fails_over_then_raises(
@@ -875,7 +875,7 @@ def test_sync_responses_stream_fails_over_with_same_idempotency_key(
 
     assert events[0]["event"] == "response.completed"
     assert seen[0][0] == "api.trustedrouter.com"
-    assert seen[1][0] == "api.trustedrouter.com"
+    assert seen[1][0] == "api.allyrouter.com"
     assert seen[0][1] is not None
     assert seen[0][1] == seen[1][1]
 
@@ -907,7 +907,7 @@ def test_sync_responses_raw_stream_passes_through_bytes_and_fails_over(
     raw = b"".join(sdk.responses_raw_stream(input="ping"))
     sdk.close()
 
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
     assert b"response.created" in raw
     assert b"[DONE]" in raw
 
@@ -952,7 +952,7 @@ def test_sync_responses_raw_stream_transport_error_fails_over(
         regional_failover=True,
     )
     assert b"response.completed" in b"".join(sdk.responses_raw_stream(input="ping"))
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
     sdk.close()
 
 
@@ -1195,11 +1195,13 @@ def test_async_chat_stream_and_chunk_stream_fail_over_before_first_byte(
 
     assert text == ["OK"]
     assert chunk_count == 1
+    # Two independent stream calls, each failing once. base_index resets per
+    # call, so each starts on the primary and fails over to the first alias.
     assert [host for host, _ in seen] == [
         "api.trustedrouter.com",
+        "api.allyrouter.com",
         "api.trustedrouter.com",
-        "api.trustedrouter.com",
-        "api.trustedrouter.com",
+        "api.allyrouter.com",
     ]
     assert seen[0][1] == seen[1][1]
     assert seen[2][1] == seen[3][1]
@@ -1277,7 +1279,7 @@ def test_async_responses_raw_stream_regional_failover_and_error(
         return raw
 
     assert b"response.created" in asyncio.run(ok())
-    assert seen_hosts == ["api.trustedrouter.com", "api.trustedrouter.com"]
+    assert seen_hosts == ["api.trustedrouter.com", "api.allyrouter.com"]
 
     def error_handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(501, json={"error": {"message": "nope"}})
@@ -1328,7 +1330,7 @@ def test_async_responses_stream_regional_failover_preserves_idempotency(
 
     assert events[0]["event"] == "response.completed"
     assert seen[0] == ("api.trustedrouter.com", seen[0][1])
-    assert seen[1] == ("api.trustedrouter.com", seen[0][1])
+    assert seen[1] == ("api.allyrouter.com", seen[0][1])
 
 
 def test_async_broadcast_destination_helpers() -> None:
