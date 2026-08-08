@@ -194,6 +194,28 @@ client = TrustedRouter(
 Overriding `base_url` no longer changes `models()`, `providers()`, `regions()`,
 `credits()`, `activity()`, billing checkout, auth, OAuth, or broadcast calls.
 
+### Alias domains
+
+The regions above all live under one name on one DNS provider, and the domain
+sits above every cloud behind it. A zone that stops answering, a registrar
+lock, or a resolver handing out a stale record takes the API down no matter how
+many regions are healthy.
+
+`api.allyrouter.com` and `api.uptimerouter.com` are exact aliases of
+`api.trustedrouter.com`, on separate domains served by separate DNS providers,
+resolving to the same attested enclaves. They sit at the end of the candidate
+list, after the regional gateways, so a healthy deployment never touches them.
+Nothing to configure — it is on by default.
+
+Failover changes host only on connection failures and on `502`, `503`, or
+`504`. A `500` means a server received and processed the request, and inference
+is not idempotent, so re-sending it to another domain risks being billed twice;
+a 500 is retried on the same host.
+
+Aliases are used only for the default `base_url`. A custom one — a private
+deployment, a test server, a regional pin — is never rewritten. Pass
+`regional_failover=False` to keep every attempt on a single host.
+
 ## Typed errors
 
 Every HTTP failure raises a typed subclass of `TrustedRouterError` so callers
