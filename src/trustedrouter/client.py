@@ -45,6 +45,18 @@ REGION_BASE_URLS: tuple[str, ...] = (
     "https://api-us-east4.quillrouter.com/v1",
     "https://api-europe-west4.quillrouter.com/v1",
 )
+# Exact aliases of the primary API, on separate domains served by separate DNS
+# providers (trustedrouter.com from Google Cloud DNS, these two from Route 53).
+#
+# The domain is a single point of failure sitting above the whole deployment: a
+# zone that stops answering, a registrar lock, or a resolver handing out a stale
+# record takes the API down no matter how many clouds are behind it. These names
+# resolve to the same attested enclaves, so falling back to one costs nothing
+# and is invisible to callers.
+ALIAS_API_BASE_URLS: tuple[str, ...] = (
+    "https://api.allyrouter.com/v1",
+    "https://api.uptimerouter.com/v1",
+)
 AUTO_MODEL = "trustedrouter/auto"
 FAST_MODEL = "trustedrouter/fast"
 ZDR_MODEL = "trustedrouter/zdr"
@@ -574,7 +586,22 @@ def _regional_failoverable(status_code: int) -> bool:
 
 
 def _inference_base_urls(primary_base_url: str) -> list[str]:
-    return [primary_base_url.rstrip("/")]
+    """Primary first, then the alias domains.
+
+    This list must have MORE THAN ONE entry or failover cannot engage at all.
+    Every advance downstream is guarded by `base_index < len(base_urls) - 1`,
+    so a single-entry list makes the transport-error and 502/503/504 handling
+    unreachable — the machinery was present and could never run.
+
+    Aliases are appended only for the default API host. A caller who passed
+    their own base_url (a private deployment, a test server, a regional pin)
+    gets exactly what they asked for; silently redirecting that to a public
+    alias would be worse than failing.
+    """
+    primary = primary_base_url.rstrip("/")
+    if primary != DEFAULT_API_BASE_URL.rstrip("/"):
+        return [primary]
+    return list(dict.fromkeys([primary, *(u.rstrip("/") for u in ALIAS_API_BASE_URLS)]))
 
 
 def _region_candidates(primary_base_url: str) -> list[str]:
@@ -591,8 +618,20 @@ def _healthy_region_status(status_code: int) -> bool:
 def _ordered_regions(primary_base_url: str, winner: str | None) -> list[str]:
     primary = primary_base_url.rstrip("/")
     if winner is None:
-        return [primary]
-    return list(dict.fromkeys([winner, primary, *_region_candidates(primary_base_url)]))
+        # No region answered the health race. That is exactly when the alias
+        # domains matter, so fall back to the same list used without affinity
+        # rather than collapsing to a single unreachable host.
+        return _inference_base_urls(primary_base_url)
+    return list(
+        dict.fromkeys(
+            [
+                winner,
+                primary,
+                *_region_candidates(primary_base_url),
+                *_inference_base_urls(primary_base_url),
+            ]
+        )
+    )
 
 
 def _select_regions_sync(
