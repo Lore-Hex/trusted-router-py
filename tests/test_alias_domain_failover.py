@@ -15,6 +15,7 @@ import pytest
 from trustedrouter.client import (
     ALIAS_API_BASE_URLS,
     DEFAULT_API_BASE_URL,
+    AsyncTrustedRouter,
     InternalError,
     TrustedRouter,
     _inference_base_urls,
@@ -44,14 +45,127 @@ def test_a_failed_health_race_still_leaves_the_aliases() -> None:
     assert len(_ordered_regions(DEFAULT_API_BASE_URL, None)) > 1
 
 
-def _client_with_transport(handler) -> TrustedRouter:
+def _client_with_transport(handler, **kwargs) -> TrustedRouter:
     # No base_url: the default host is what activates the alias list, and it is
     # the configuration every real caller uses.
     return TrustedRouter(
         api_key="sk-test",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         max_retries=3,
+        **kwargs,
     )
+
+
+def test_regional_failover_false_keeps_every_attempt_on_one_host() -> None:
+    """`regional_failover=False` is an instruction, not a hint.
+
+    Before the aliases existed the candidate list had one entry, so this flag
+    was satisfied by accident: there was nowhere else to go. Adding the aliases
+    made the un-guarded advance in this loop reachable, which would have moved
+    a caller who explicitly opted out onto a domain they never named.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    client = _client_with_transport(handler, regional_failover=False)
+    with pytest.raises(InternalError):
+        client.request("GET", "/models")
+
+    assert len(seen) > 1, "expected the pinned host to be retried"
+    assert set(seen) == {"api.trustedrouter.com"}, f"opted out and still moved: {seen}"
+
+
+def test_regional_failover_false_pins_the_host_on_a_transport_error() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        raise httpx.ConnectError("name resolution failed", request=request)
+
+    client = _client_with_transport(handler, regional_failover=False)
+    with pytest.raises(InternalError):
+        client.request("GET", "/models")
+
+    assert set(seen) == {"api.trustedrouter.com"}, f"opted out and still moved: {seen}"
+
+
+def _async_client_with_transport(handler, **kwargs) -> AsyncTrustedRouter:
+    return AsyncTrustedRouter(
+        api_key="sk-test",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        max_retries=3,
+        **kwargs,
+    )
+
+
+# The async client is a second, hand-maintained copy of the request loop.
+# Ungating its advance passed the entire suite before these tests existed, so
+# the sync tests above prove nothing at all about it.
+
+
+@pytest.mark.asyncio
+async def test_async_client_also_reaches_an_alias() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        if request.url.host == "api.trustedrouter.com":
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(200, json={"ok": True})
+
+    client = _async_client_with_transport(handler)
+    assert await client.request("GET", "/models") == {"ok": True}
+    assert seen[0] == "api.trustedrouter.com", "primary must be attempted first"
+    assert "api.allyrouter.com" in seen, f"never reached an alias: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_async_regional_failover_false_keeps_every_attempt_on_one_host() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    client = _async_client_with_transport(handler, regional_failover=False)
+    with pytest.raises(InternalError):
+        await client.request("GET", "/models")
+
+    assert len(seen) > 1, "expected the pinned host to be retried"
+    assert set(seen) == {"api.trustedrouter.com"}, f"opted out and still moved: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_async_regional_failover_false_pins_the_host_on_a_transport_error() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        raise httpx.ConnectError("name resolution failed", request=request)
+
+    client = _async_client_with_transport(handler, regional_failover=False)
+    with pytest.raises(InternalError):
+        await client.request("GET", "/models")
+
+    assert set(seen) == {"api.trustedrouter.com"}, f"opted out and still moved: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_async_500_does_not_move_to_another_domain() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = _async_client_with_transport(handler)
+    with pytest.raises(InternalError) as raised:
+        await client.request("GET", "/models")
+    assert raised.value.status_code == 500
+    assert set(seen) == {"api.trustedrouter.com"}, f"a 500 leaked to another domain: {seen}"
 
 
 def test_a_dead_primary_domain_reaches_an_alias() -> None:

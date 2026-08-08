@@ -1272,14 +1272,18 @@ class TrustedRouter:
             except httpx.TransportError as exc:
                 if attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(base_urls) - 1:
+                if self._regional_failover and base_index < len(base_urls) - 1:
                     base_index += 1
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
                 continue
             if attempt >= self.max_retries or not _retryable(response.status_code):
                 return _json_or_raise(response)
-            if _regional_failoverable(response.status_code) and base_index < len(base_urls) - 1:
+            if (
+                self._regional_failover
+                and _regional_failoverable(response.status_code)
+                and base_index < len(base_urls) - 1
+            ):
                 base_index += 1
             time.sleep(_retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers)))
             attempt += 1
@@ -2115,14 +2119,18 @@ class AsyncTrustedRouter:
             except httpx.TransportError as exc:
                 if attempt >= self.max_retries:
                     raise _transport_retry_error(exc) from exc
-                if base_index < len(base_urls) - 1:
+                if self._regional_failover and base_index < len(base_urls) - 1:
                     base_index += 1
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
                 continue
             if attempt >= self.max_retries or not _retryable(response.status_code):
                 return _json_or_raise(response)
-            if _regional_failoverable(response.status_code) and base_index < len(base_urls) - 1:
+            if (
+                self._regional_failover
+                and _regional_failoverable(response.status_code)
+                and base_index < len(base_urls) - 1
+            ):
                 base_index += 1
             await asyncio.sleep(
                 _retry_sleep(attempt, retry_after=_retry_after_seconds(response.headers))
