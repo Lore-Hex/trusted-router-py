@@ -15,6 +15,7 @@ import pytest
 from trustedrouter.client import (
     ALIAS_API_BASE_URLS,
     DEFAULT_API_BASE_URL,
+    InternalError,
     TrustedRouter,
     _inference_base_urls,
     _ordered_regions,
@@ -100,7 +101,8 @@ def test_a_500_does_NOT_move_to_another_domain() -> None:
         return httpx.Response(500, json={"error": "boom"})
 
     client = _client_with_transport(handler)
-    with pytest.raises(Exception):
+    with pytest.raises(InternalError) as raised:
         client.request("GET", "/models")
+    assert raised.value.status_code == 500
 
     assert set(seen) == {"api.trustedrouter.com"}, f"a 500 leaked to another domain: {seen}"
