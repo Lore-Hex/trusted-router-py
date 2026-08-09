@@ -208,9 +208,11 @@ list, after the regional gateways, so a healthy deployment never touches them.
 Nothing to configure — it is on by default.
 
 Failover changes host only on connection failures and on `502`, `503`, or
-`504`. A `500` means a server received and processed the request, and inference
-is not idempotent, so re-sending it to another domain risks being billed twice;
-a 500 is retried on the same host.
+`504`. A `500` means a server received and processed the request. You are not
+charged twice for it — authorization is idempotent per `Idempotency-Key` and
+settlement happens once — but the work would run a second time, so the answer
+could differ and TrustedRouter pays the provider again. A 500 is retried on the
+same host.
 
 Aliases are used only for the default `base_url`. A custom one — a private
 deployment, a test server, a regional pin — is never rewritten. Pass
