@@ -562,6 +562,16 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     of seconds OR an HTTP-date; we only honor the integer form because
     the gateway only emits that and the date form is rarely useful for
     short retries."""
+    # retry-after-ms wins when both are present: it is the more precise of the
+    # two, and a server that bothers to send it means the sub-second value.
+    raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
+    if raw_ms:
+        try:
+            millis = float(raw_ms.strip())
+        except (TypeError, ValueError):
+            millis = -1.0
+        if millis >= 0:
+            return millis / 1000.0
     raw = headers.get("retry-after") or headers.get("Retry-After")
     if not raw:
         return None
@@ -574,14 +584,57 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
 # ---- retry policy --------------------------------------------------------
 
 
-def _retryable(status_code: int) -> bool:
+def _should_retry_header(headers: Mapping[str, str]) -> bool | None:
+    """The gateway's explicit verdict, which overrides everything below.
+
+    A status code cannot say whether a provider already ran. A 502 from "could
+    not reach the provider" and a 502 from "the generation succeeded and then
+    settlement failed" are indistinguishable to us, and only the second one is
+    dangerous to re-send. The gateway knows which it is and says so here.
+
+    Same header OpenAI's clients honor. `None` means the server did not say,
+    and the status heuristics below apply.
+    """
+    raw = headers.get("x-should-retry") or headers.get("X-Should-Retry")
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _retryable(status_code: int, headers: Mapping[str, str] | None = None) -> bool:
     """Which responses the SDK retries by default. 429 + 5xx are safe
     to retry idempotently; the gateway is responsible for 5xx-on-write
     being safe (its writes are idempotent or the response is 4xx)."""
+    if headers is not None:
+        verdict = _should_retry_header(headers)
+        if verdict is not None:
+            return verdict
     return status_code == 429 or status_code >= 500
 
 
-def _regional_failoverable(status_code: int) -> bool:
+def _regional_failoverable(
+    status_code: int, headers: Mapping[str, str] | None = None
+) -> bool:
+    """Which responses may move to a DIFFERENT domain.
+
+    An explicit `x-should-retry: false` forbids it outright: that is the
+    gateway telling us a provider already ran, which is precisely the case
+    where re-sending anywhere costs a second generation.
+
+    That check is UNREACHABLE today and has no test, deliberately: every caller
+    consults `_retryable` first, which already returns False for a labelled
+    response, so we never get here. It is kept so that widening the retry set
+    later cannot silently reintroduce domain movement on a spent response —
+    the failure this whole header exists to prevent. Mutation-testing it
+    correctly reports it as surviving.
+    """
+    if headers is not None and _should_retry_header(headers) is False:
+        return False
     return status_code in {502, 503, 504}
 
 
@@ -713,12 +766,13 @@ def _retryable_stream_open_status(
     status_code: int,
     *,
     regional_failover: bool,
+    headers: Mapping[str, str] | None = None,
 ) -> bool:
     # Streaming responses are still unopened at this point, so retrying has
     # the same idempotency semantics as a normal request. Regional failover is
     # handled separately: 429 and non-gateway 5xx back off on the pinned host.
     del regional_failover
-    return _retryable(status_code)
+    return _retryable(status_code, headers)
 
 
 def _transport_retry_error(exc: httpx.TransportError) -> InternalError:
@@ -1215,11 +1269,16 @@ class TrustedRouter:
                 self._regional_affinity_pending = False
         return self._base_urls
 
-    def _base_index_after_status(self, status_code: int, base_index: int) -> int:
+    def _base_index_after_status(
+        self,
+        status_code: int,
+        base_index: int,
+        headers: Mapping[str, str] | None = None,
+    ) -> int:
         base_urls = self._active_inference_base_urls()
         if (
             self._regional_failover
-            and _regional_failoverable(status_code)
+            and _regional_failoverable(status_code, headers)
             and base_index < len(base_urls) - 1
         ):
             return base_index + 1
@@ -1277,11 +1336,13 @@ class TrustedRouter:
                 time.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
                 continue
-            if attempt >= self.max_retries or not _retryable(response.status_code):
+            if attempt >= self.max_retries or not _retryable(
+                response.status_code, response.headers
+            ):
                 return _json_or_raise(response)
             if (
                 self._regional_failover
-                and _regional_failoverable(response.status_code)
+                and _regional_failoverable(response.status_code, response.headers)
                 and base_index < len(base_urls) - 1
             ):
                 base_index += 1
@@ -1368,10 +1429,11 @@ class TrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             response.read()
                             base_index = self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             time.sleep(
                                 _retry_sleep(
@@ -1431,10 +1493,11 @@ class TrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             response.read()
                             base_index = self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             time.sleep(
                                 _retry_sleep(
@@ -1492,10 +1555,11 @@ class TrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             response.read()
                             base_index = self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             time.sleep(
                                 _retry_sleep(
@@ -1713,10 +1777,11 @@ class TrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             response.read()
                             base_index = self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             time.sleep(
                                 _retry_sleep(
@@ -1778,10 +1843,11 @@ class TrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             response.read()
                             base_index = self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             time.sleep(
                                 _retry_sleep(
@@ -2062,11 +2128,16 @@ class AsyncTrustedRouter:
                 self._regional_affinity_pending = False
         return self._base_urls
 
-    async def _base_index_after_status(self, status_code: int, base_index: int) -> int:
+    async def _base_index_after_status(
+        self,
+        status_code: int,
+        base_index: int,
+        headers: Mapping[str, str] | None = None,
+    ) -> int:
         base_urls = await self._active_inference_base_urls()
         if (
             self._regional_failover
-            and _regional_failoverable(status_code)
+            and _regional_failoverable(status_code, headers)
             and base_index < len(base_urls) - 1
         ):
             return base_index + 1
@@ -2124,11 +2195,13 @@ class AsyncTrustedRouter:
                 await asyncio.sleep(_retry_sleep(attempt, retry_after=None))
                 attempt += 1
                 continue
-            if attempt >= self.max_retries or not _retryable(response.status_code):
+            if attempt >= self.max_retries or not _retryable(
+                response.status_code, response.headers
+            ):
                 return _json_or_raise(response)
             if (
                 self._regional_failover
-                and _regional_failoverable(response.status_code)
+                and _regional_failoverable(response.status_code, response.headers)
                 and base_index < len(base_urls) - 1
             ):
                 base_index += 1
@@ -2212,10 +2285,11 @@ class AsyncTrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             await response.aread()
                             base_index = await self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             await asyncio.sleep(
                                 _retry_sleep(
@@ -2273,10 +2347,11 @@ class AsyncTrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             await response.aread()
                             base_index = await self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             await asyncio.sleep(
                                 _retry_sleep(
@@ -2333,10 +2408,11 @@ class AsyncTrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             await response.aread()
                             base_index = await self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             await asyncio.sleep(
                                 _retry_sleep(
@@ -2392,10 +2468,11 @@ class AsyncTrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             await response.aread()
                             base_index = await self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             await asyncio.sleep(
                                 _retry_sleep(
@@ -2602,10 +2679,11 @@ class AsyncTrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             await response.aread()
                             base_index = await self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             await asyncio.sleep(
                                 _retry_sleep(
@@ -2668,10 +2746,11 @@ class AsyncTrustedRouter:
                         if attempt < self.max_retries and _retryable_stream_open_status(
                             response.status_code,
                             regional_failover=self._regional_failover,
+                            headers=response.headers,
                         ):
                             await response.aread()
                             base_index = await self._base_index_after_status(
-                                response.status_code, base_index
+                                response.status_code, base_index, response.headers
                             )
                             await asyncio.sleep(
                                 _retry_sleep(
