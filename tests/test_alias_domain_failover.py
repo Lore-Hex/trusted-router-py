@@ -206,7 +206,9 @@ def test_a_503_from_the_primary_reaches_an_alias() -> None:
 
 def test_a_500_does_NOT_move_to_another_domain() -> None:
     """A 500 means a server received and processed the request. Inference is
-    not idempotent, so retrying it on another domain risks charging twice.
+    not idempotent. The caller is not charged twice (authorization is
+    idempotent per Idempotency-Key, settlement is exactly-once) but the work
+    would run again, costing TrustedRouter a second upstream generation.
     Failover is for connection failures and 502/503/504 only."""
     seen: list[str] = []
 
