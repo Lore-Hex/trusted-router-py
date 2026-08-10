@@ -1,0 +1,75 @@
+"""Shared constants (L7 data): default URLs, timeouts, and model aliases.
+
+These values are pinned by the cross-SDK parity tests
+(tests/test_parity_contract.py, tests/test_client.py) and must not change
+here without a coordinated release across every TrustedRouter SDK.
+"""
+
+from __future__ import annotations
+
+DEFAULT_API_BASE_URL = "https://api.trustedrouter.com/v1"
+DEFAULT_CONTROL_BASE_URL = "https://trustedrouter.com/v1"
+DEFAULT_TRUST_RELEASE_URL = "https://trust.trustedrouter.com/trust/gcp-release.json"
+DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_FUSION_TIMEOUT_SECONDS = 600.0
+DEFAULT_REGION_PROBE_TIMEOUT_SECONDS = 1.5
+REGION_BASE_URLS: tuple[str, ...] = (
+    "https://api-us-central1.quillrouter.com/v1",
+    "https://api-us-east4.quillrouter.com/v1",
+    "https://api-europe-west4.quillrouter.com/v1",
+)
+# Exact aliases of the primary API, on separate domains served by separate DNS
+# providers (trustedrouter.com from Google Cloud DNS, these two from Route 53).
+#
+# The domain is a single point of failure sitting above the whole deployment: a
+# zone that stops answering, a registrar lock, or a resolver handing out a stale
+# record takes the API down no matter how many clouds are behind it. These names
+# resolve to the same attested enclaves, so falling back to one costs nothing
+# and is invisible to callers.
+ALIAS_API_BASE_URLS: tuple[str, ...] = (
+    "https://api.allyrouter.com/v1",
+    "https://api.uptimerouter.com/v1",
+)
+AUTO_MODEL = "trustedrouter/auto"
+FAST_MODEL = "trustedrouter/fast"
+ZDR_MODEL = "trustedrouter/zdr"
+E2E_MODEL = "trustedrouter/e2e"
+CONFIDENTIAL_MODEL = "trustedrouter/confidential"
+EU_MODEL = "trustedrouter/eu"
+US_MODEL = "trustedrouter/us"
+FUSION_MODEL = "trustedrouter/fusion"
+SYNTH_MODEL = "trustedrouter/synth"
+ADVISOR_MODEL = "trustedrouter/advisor"
+SELECTOR_MODEL = "trustedrouter/selector"
+MAP_REDUCE_MODEL = "trustedrouter/mapreduce"
+SUBAGENT_MODEL = "trustedrouter/subagent"
+SOCRATES_MODEL = "trustedrouter/socrates-1.1"
+PROMETHEUS_MODEL = "trustedrouter/prometheus-2.0"
+ZEUS_MODEL = "trustedrouter/zeus-1.0"
+ATHENA_MODEL = "trustedrouter/athena"
+
+# Recommended panel + judge fallback chain for maximum willingness to answer.
+# Use gateway-supported latest aliases where possible so examples survive
+# provider deprecations without requiring an SDK release.
+FUSION_FREEDOM_PANEL: tuple[str, ...] = (
+    "minimax/minimax-m3",
+    "~kimi/latest",
+    "~zai/glm-latest",
+    "google/gemma-4-31b-it",
+    "deepseek/deepseek-v4-flash",
+)
+FUSION_FREEDOM_FALLBACK_JUDGES: tuple[str, ...] = (
+    "minimax/minimax-m3",
+    "~zai/glm-latest",
+    "~kimi/latest",
+    "deepseek/deepseek-v4-flash",
+    "google/gemma-4-31b-it",
+)
+FUSION_FREEDOM_FALLBACK_FINALS: tuple[str, ...] = (
+    "minimax/minimax-m3",
+    "~zai/glm-latest",
+    "~kimi/latest",
+    "deepseek/deepseek-v4-flash",
+    "google/gemma-4-31b-it",
+)
