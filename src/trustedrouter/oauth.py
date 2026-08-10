@@ -37,12 +37,9 @@ from typing import Any
 
 import httpx
 
-from trustedrouter.client import (
-    _DEFAULT_USER_AGENT,
-    DEFAULT_CONTROL_BASE_URL,
-    _classify_error,
-    _retry_after_seconds,
-)
+from trustedrouter._constants import DEFAULT_CONTROL_BASE_URL
+from trustedrouter._errors import _json_or_raise
+from trustedrouter._requests import _DEFAULT_USER_AGENT
 
 # ---- low-level encoding helpers ------------------------------------------
 
@@ -219,46 +216,9 @@ def create_oauth_authorization(
 
 
 # ---- HTTP plumbing --------------------------------------------------------
-
-
-def _json_or_raise(response: httpx.Response) -> dict[str, Any]:
-    """Parse a JSON object response, raising the SDK's typed errors on
-    HTTP >= 400 — a local copy of the client's plumbing so the OAuth
-    helpers don't need a client instance."""
-    retry_after = _retry_after_seconds(response.headers)
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        if response.is_error:
-            raise _classify_error(
-                response.status_code,
-                response.text[:240],
-                payload=None,
-                retry_after=retry_after,
-            ) from exc
-        raise
-    if response.is_error:
-        message = _error_message(payload)
-        raise _classify_error(
-            response.status_code, message, payload=payload, retry_after=retry_after
-        )
-    if not isinstance(payload, dict):
-        from trustedrouter.client import TrustedRouterError
-
-        raise TrustedRouterError(
-            response.status_code, "Expected JSON object", payload=payload
-        )
-    return payload
-
-
-def _error_message(payload: Any) -> str:
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict):
-            return str(error.get("message") or error.get("type") or "TrustedRouter error")
-        if payload.get("message"):
-            return str(payload["message"])
-    return "TrustedRouter error"
+# `_json_or_raise` is imported from `trustedrouter._errors` — the single
+# copy of the error taxonomy — so the OAuth helpers raise the SDK's typed
+# errors without keeping a private duplicate of the plumbing.
 
 
 def _exchange_body(

@@ -222,3 +222,52 @@ def test_a_500_does_NOT_move_to_another_domain() -> None:
     assert raised.value.status_code == 500
 
     assert set(seen) == {"api.trustedrouter.com"}, f"a 500 leaked to another domain: {seen}"
+
+
+def test_sync_stream_regional_failover_false_pins_host_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streaming paths used to advance domains on a transport error even
+    when the caller passed regional_failover=False — drift versus request(),
+    whose advance was always gated on the flag. The unified transport engine
+    gates every advance, streaming included: the flag is an instruction, not
+    a hint."""
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        raise httpx.ConnectError("name resolution failed", request=request)
+
+    client = _client_with_transport(handler, regional_failover=False)
+    with pytest.raises(InternalError):
+        list(
+            client.chat_completions_stream(
+                model="m", messages=[{"role": "user", "content": "x"}]
+            )
+        )
+
+    assert len(seen) > 1, "expected the pinned host to be retried in place"
+    assert set(seen) == {"api.trustedrouter.com"}, f"opted out and still moved: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_async_stream_regional_failover_false_pins_host_on_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        raise httpx.ConnectError("name resolution failed", request=request)
+
+    client = _async_client_with_transport(handler, regional_failover=False)
+    with pytest.raises(InternalError):
+        async for _ in client.chat_completions_stream(
+            model="m", messages=[{"role": "user", "content": "x"}]
+        ):
+            pass
+
+    assert len(seen) > 1, "expected the pinned host to be retried in place"
+    assert set(seen) == {"api.trustedrouter.com"}, f"opted out and still moved: {seen}"
