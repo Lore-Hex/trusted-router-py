@@ -90,6 +90,17 @@ def _good_claims(*, nonce_hex: str | None = None) -> dict[str, object]:
     }
 
 
+def _policy(**overrides: object) -> AttestationPolicy:
+    """A policy pinning the image `_good_claims` attests to.
+
+    Verification refuses a policy that pins no image identity at all, so tests
+    aimed at some *other* check still have to pin one. Defaulting to the digest
+    the fixture claims carry keeps those tests reaching the check they target.
+    """
+    overrides.setdefault("expected_image_digest", "sha256:abc123")
+    return AttestationPolicy(**overrides)  # type: ignore[arg-type]
+
+
 # ---- happy path ---------------------------------------------------------
 
 
@@ -133,7 +144,7 @@ def test_verify_tls_exporter_binding_accepts_distinct_fresh_nonce() -> None:
 
     result = verify_gateway_attestation(
         jwt,
-        policy=AttestationPolicy(),
+        policy=_policy(),
         nonce_hex=nonce,
         tls_cert_der=_FAKE_CERT,
         tls_exporter=exporter,
@@ -152,7 +163,7 @@ def test_verify_tls_exporter_binding_rejects_missing_exporter_nonce() -> None:
     with pytest.raises(AttestationVerificationError, match="TLS exporter binding"):
         verify_gateway_attestation(
             jwt,
-            policy=AttestationPolicy(),
+            policy=_policy(),
             nonce_hex=nonce,
             tls_cert_der=_FAKE_CERT,
             tls_exporter=exporter,
@@ -171,7 +182,7 @@ def test_verify_tls_exporter_binding_rejects_missing_fresh_nonce() -> None:
     with pytest.raises(AttestationVerificationError, match="fresh nonce required"):
         verify_gateway_attestation(
             jwt,
-            policy=AttestationPolicy(),
+            policy=_policy(),
             tls_cert_der=_FAKE_CERT,
             tls_exporter=exporter,
             jwks={"keys": [_public_jwk(key)]},
@@ -187,7 +198,7 @@ def test_verify_tls_exporter_binding_rejects_single_slot_relay_closure() -> None
     with pytest.raises(AttestationVerificationError, match="fresh nonce must differ"):
         verify_gateway_attestation(
             jwt,
-            policy=AttestationPolicy(),
+            policy=_policy(),
             nonce_hex=exporter.hex(),
             tls_cert_der=_FAKE_CERT,
             tls_exporter=exporter,
@@ -212,12 +223,12 @@ def test_verify_works_when_aud_is_a_string_not_a_list() -> None:
 
 def test_malformed_jwt_raises() -> None:
     with pytest.raises(AttestationVerificationError, match="3 JWT segments"):
-        verify_gateway_attestation(b"only.two", policy=AttestationPolicy(), jwks={"keys": []})
+        verify_gateway_attestation(b"only.two", policy=_policy(), jwks={"keys": []})
 
 
 def test_bad_base64_in_jwt_raises() -> None:
     with pytest.raises(AttestationVerificationError, match="invalid JWT"):
-        verify_gateway_attestation(b"!!!.???.@@@", policy=AttestationPolicy(), jwks={"keys": []})
+        verify_gateway_attestation(b"!!!.???.@@@", policy=_policy(), jwks={"keys": []})
 
 
 def test_unsupported_alg_raises() -> None:
@@ -225,7 +236,7 @@ def test_unsupported_alg_raises() -> None:
     jwt = _make_jwt(key, _good_claims(), alg="HS256")
     with pytest.raises(AttestationVerificationError, match="unsupported JWT alg"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -234,7 +245,7 @@ def test_missing_kid_in_jwks_raises() -> None:
     jwt = _make_jwt(key, _good_claims(), kid="missing-kid")
     with pytest.raises(AttestationVerificationError, match="no JWK with kid"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key, kid="other")]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key, kid="other")]}
         )
 
 
@@ -246,7 +257,7 @@ def test_signature_mismatch_raises() -> None:
     jwt = _make_jwt(key_a, _good_claims())
     with pytest.raises(AttestationVerificationError, match="signature"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key_b)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key_b)]}
         )
 
 
@@ -257,7 +268,7 @@ def test_expired_jwt_raises() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="expired"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -272,7 +283,7 @@ def test_missing_or_invalid_expiration_raises(exp: object) -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="valid expiration"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -284,7 +295,7 @@ def test_production_attestation_claims_fail_closed(field: str) -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -295,11 +306,11 @@ def test_debug_attestation_requires_explicit_development_opt_out() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="disabled-since-boot"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
     result = verify_gateway_attestation(
         jwt,
-        policy=AttestationPolicy(allow_debug=True),
+        policy=_policy(allow_debug=True),
         jwks={"keys": [_public_jwk(key)]},
     )
     assert result.raw_claims["dbgstat"] == "enabled"
@@ -312,7 +323,7 @@ def test_invalid_audience_shape_raises() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="aud must"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -323,7 +334,7 @@ def test_wrong_issuer_raises() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="issuer"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -334,7 +345,7 @@ def test_wrong_audience_raises() -> None:
     jwt = _make_jwt(key, claims)
     with pytest.raises(AttestationVerificationError, match="audience"):
         verify_gateway_attestation(
-            jwt, policy=AttestationPolicy(), jwks={"keys": [_public_jwk(key)]}
+            jwt, policy=_policy(), jwks={"keys": [_public_jwk(key)]}
         )
 
 
@@ -367,7 +378,7 @@ def test_missing_nonce_raises_when_caller_supplied_one() -> None:
     with pytest.raises(AttestationVerificationError, match="nonce"):
         verify_gateway_attestation(
             jwt,
-            policy=AttestationPolicy(),
+            policy=_policy(),
             nonce_hex="expected-nonce-hex",
             tls_cert_der=_FAKE_CERT,
             jwks={"keys": [_public_jwk(key)]},
@@ -385,7 +396,7 @@ def test_missing_cert_binding_raises() -> None:
     with pytest.raises(AttestationVerificationError, match="TLS cert"):
         verify_gateway_attestation(
             jwt,
-            policy=AttestationPolicy(),
+            policy=_policy(),
             tls_cert_der=_FAKE_CERT,
             jwks={"keys": [_public_jwk(key)]},
         )
@@ -403,7 +414,7 @@ def test_jwt_cert_sha_mismatch_with_actual_tls_cert_raises() -> None:
     with pytest.raises(AttestationVerificationError, match="TLS cert mismatch"):
         verify_gateway_attestation(
             jwt,
-            policy=AttestationPolicy(),
+            policy=_policy(),
             tls_cert_der=_FAKE_CERT,
             jwks={"keys": [_public_jwk(key)]},
         )
@@ -414,7 +425,7 @@ def test_policy_pin_overrides_runtime_when_set() -> None:
     that doesn't match must fail. This is the trust-page-pin path."""
     key = _gen_keypair()
     jwt = _make_jwt(key, _good_claims())
-    policy = AttestationPolicy(expected_cert_sha256="0" * 64)
+    policy = _policy(expected_cert_sha256="0" * 64)
     with pytest.raises(AttestationVerificationError, match="policy pin"):
         verify_gateway_attestation(
             jwt,
@@ -448,14 +459,24 @@ def test_policy_from_trust_release_pulls_digest_and_reference() -> None:
     assert policy.gcp_audience == "quill-cloud"
 
 
-def test_policy_from_trust_release_handles_missing_fields() -> None:
-    """If the trust release lacks the digest/reference, the policy fields
-    are None — verifier will skip those checks."""
-    policy = policy_from_trust_release(release={})
-    assert policy.expected_image_digest is None
-    assert policy.expected_image_digests == ()
+def test_policy_from_trust_release_refuses_missing_fields() -> None:
+    """A release carrying no image identity is refused rather than turned into
+    a policy that skips both image checks. Previously this returned an unpinned
+    policy, which downgraded verification to "some Confidential Space workload"
+    without surfacing an error. See tests/test_attestation_properties.py."""
+    with pytest.raises(AttestationVerificationError, match="pins no image identity"):
+        policy_from_trust_release(release={})
+
+
+def test_policy_from_trust_release_keeps_partial_fields() -> None:
+    """A release with only one of the two identity kinds is still usable —
+    non-vacuity requires one, not both."""
+    policy = policy_from_trust_release(release={"image_digest": "sha256:beef"})
+    assert policy.expected_image_digest == "sha256:beef"
+    assert policy.expected_image_digests == ("sha256:beef",)
     assert policy.expected_image_reference is None
     assert policy.expected_image_references == ()
+    assert policy.pins_image_identity
 
 
 def test_rollout_policy_accepts_each_published_image_and_rejects_other() -> None:

@@ -70,6 +70,23 @@ class AttestationPolicy:
     expected_image_references: tuple[str, ...] = ()
     allow_debug: bool = False
 
+    @property
+    def pins_image_identity(self) -> bool:
+        """Whether this policy constrains *which* workload image is acceptable.
+
+        Both image checks in `_check_claims` are skipped when their accepted
+        set is empty, so a policy that pins neither a digest nor a reference
+        accepts any genuinely-attested Confidential Space workload — it proves
+        "some CSP VM" rather than "the gateway build we published". Policy
+        construction and verification both refuse that state rather than
+        silently downgrading the guarantee."""
+        return bool(
+            self.expected_image_digests
+            or self.expected_image_digest
+            or self.expected_image_references
+            or self.expected_image_reference
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class GatewayAttestation:
@@ -136,7 +153,7 @@ def policy_from_trust_release(
         accepted_image_digests = (image_digest,)
     if not accepted_image_references and image_reference:
         accepted_image_references = (image_reference,)
-    return AttestationPolicy(
+    policy = AttestationPolicy(
         gcp_audience=audience,
         expected_cert_sha256=cert_sha256,
         expected_image_digest=image_digest,
@@ -144,6 +161,18 @@ def policy_from_trust_release(
         expected_image_reference=image_reference,
         expected_image_references=accepted_image_references,
     )
+    if not policy.pins_image_identity:
+        # A truncated response, an error page that happens to parse as JSON, or
+        # a schema change all land here. Returning a policy anyway would leave
+        # the caller believing it verified a specific build while the image
+        # checks silently no-op, so refuse at the point the degraded input is
+        # visible rather than at the point the guarantee is already lost.
+        raise AttestationVerificationError(
+            "trust release pins no image identity (none of image_digest, "
+            "accepted_image_digests, image_reference, accepted_image_references); "
+            "refusing to build a policy that would accept any Confidential Space workload"
+        )
+    return policy
 
 
 # ---- low-level JWT verification -----------------------------------------
@@ -266,6 +295,15 @@ def _check_claims(
     if policy.gcp_audience not in aud_list:
         raise AttestationVerificationError(
             f"audience {policy.gcp_audience!r} not in JWT aud {aud_list!r}"
+        )
+
+    if not policy.pins_image_identity:
+        # Defence in depth for hand-constructed policies: both image checks
+        # below are guarded on a non-empty accepted set, so reaching them with
+        # nothing pinned would accept any attested workload.
+        raise AttestationVerificationError(
+            "attestation policy pins no image identity; refusing to verify against a "
+            "policy that cannot distinguish the gateway from any other workload"
         )
 
     submods = (claims.get("submods") or {}).get("container") or {}
