@@ -61,6 +61,7 @@ INVARIANTS (each line names its enforcing test):
 
 from __future__ import annotations
 
+import math
 import random
 import secrets
 from collections.abc import Callable, Mapping, Sequence
@@ -122,11 +123,45 @@ def _regional_failoverable(
     return status_code in {502, 503, 504}
 
 
+MAX_RETRY_AFTER_SECONDS = 60.0
+"""Ceiling on a server-supplied Retry-After floor.
+
+Retry-After arrives from whatever answered the socket — the gateway, a proxy
+in front of it, or an alias domain — so it is untrusted input, and it was
+being applied as an *uncapped* floor on the sleep. `Retry-After: inf` parsed
+to infinity: the async client never resumed, and the sync client raised a bare
+OverflowError out of time.sleep that is not one of this SDK's error types.
+Finite-but-absurd values were worse than they look, because they are accepted
+silently: `Retry-After: 100000` parked every caller for 27.8 hours per attempt.
+
+60 s is above any hint a healthy gateway sends and far below the point where a
+caller would rather have the error. A server asking for longer still gets its
+retries; they just arrive sooner, and `max_retries` bounds the total.
+"""
+
+
+def _bounded_retry_after(seconds: float) -> float | None:
+    """Clamp a parsed hint into [0, MAX_RETRY_AFTER_SECONDS], or reject it.
+
+    Returns None for anything not a usable delay — NaN, ±inf, negatives — so
+    that the caller falls through to plain jittered backoff. Both SDKs reject
+    exactly this set, so the two accept the same header language.
+    """
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
+
+
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     """Parse Retry-After. Per RFC 7231 it can be either an integer number
     of seconds OR an HTTP-date; we only honor the integer form because
     the gateway only emits that and the date form is rarely useful for
-    short retries."""
+    short retries.
+
+    The result is always None or a finite value in [0, MAX_RETRY_AFTER_SECONDS]
+    — see tests/test_retry_after_bounds.py, which states that as a property
+    over arbitrary header bytes.
+    """
     # retry-after-ms wins when both are present: it is the more precise of the
     # two, and a server that bothers to send it means the sub-second value.
     raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
@@ -135,25 +170,34 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
             millis = float(raw_ms.strip())
         except (TypeError, ValueError):
             millis = -1.0
-        if millis >= 0:
-            return millis / 1000.0
+        bounded = _bounded_retry_after(millis / 1000.0) if math.isfinite(millis) else None
+        if bounded is not None:
+            return bounded
     raw = headers.get("retry-after") or headers.get("Retry-After")
     if not raw:
         return None
     try:
-        return max(0.0, float(raw.strip()))
+        return _bounded_retry_after(float(raw.strip()))
     except ValueError:
         return None
 
 
 def _retry_sleep(attempt: int, *, retry_after: float | None) -> float:
     """Exponential backoff with full jitter, capped at 30 s. If the
-    server gave us a Retry-After hint, honor that as the floor."""
-    base = min(30.0, 0.5 * (2**attempt))
+    server gave us a Retry-After hint, honor that as the floor — bounded,
+    so a hostile or broken hint cannot park or hang the caller."""
+    # 0.5 * 2**6 == 32 already exceeds the 30 s ceiling, so every attempt from
+    # 6 up is exactly 30. Special-casing that instead of computing the power
+    # keeps a caller-chosen max_retries above ~1024 from raising OverflowError
+    # out of 2**attempt (a Python int too large to convert to float).
+    base = 0.5 * (2**attempt) if attempt < 6 else 30.0
     delay = random.uniform(0, base)  # noqa: S311  not crypto
     if retry_after is not None:
         delay = max(delay, retry_after)
-    return delay
+    # Re-clamp rather than trusting the caller: _retry_sleep is monkeypatched
+    # and called directly by downstream code, so the bound belongs on the value
+    # that actually reaches time.sleep/asyncio.sleep, not only on the parser.
+    return min(delay, max(30.0, MAX_RETRY_AFTER_SECONDS))
 
 
 def _new_idempotency_key() -> str:
