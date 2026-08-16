@@ -14,6 +14,76 @@ DEFAULT_STATUS_URL = "https://status.trustedrouter.com/status.json"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 DEFAULT_FUSION_TIMEOUT_SECONDS = 600.0
 DEFAULT_REGION_PROBE_TIMEOUT_SECONDS = 1.5
+TELEMETRY_SCHEMA_VERSION = 1
+DEFAULT_TELEMETRY_PATH = "/client-events"
+TELEMETRY_HOSTS: tuple[str, ...] = (
+    "apex",
+    "ally",
+    "uptime",
+    "us_central1",
+    "us_east4",
+    "europe_west4",
+    "control",
+    "custom",
+)
+TELEMETRY_ENDPOINTS: tuple[str, ...] = (
+    "chat_completions",
+    "messages",
+    "responses",
+    "embeddings",
+    "images",
+    "videos",
+    "models",
+    "fusion",
+    "control_other",
+    "inference_other",
+)
+TELEMETRY_OUTCOMES: tuple[str, ...] = (
+    "ok",
+    "http_error",
+    "transport_error",
+    "timeout",
+    "stream_broken",
+    "aborted",
+)
+TELEMETRY_FINAL_OUTCOMES: tuple[str, ...] = (*TELEMETRY_OUTCOMES, "exhausted")
+TELEMETRY_ERROR_CLASSES: tuple[str, ...] = (
+    "dns",
+    "tls",
+    "connect_refused",
+    "connect_timeout",
+    "connect_error",
+    "read_timeout",
+    "write_timeout",
+    "pool_timeout",
+    "protocol_error",
+    "reset",
+    "io_error",
+    "proxy_error",
+    "stream_stalled",
+    "unknown",
+)
+TELEMETRY_TIMEOUT_PHASES: tuple[str, ...] = (
+    "none",
+    "connect",
+    "first_byte",
+    "idle",
+    "total",
+)
+TELEMETRY_LATENCY_BUCKETS: tuple[str, ...] = (
+    "lt100",
+    "lt200",
+    "lt400",
+    "lt800",
+    "lt1600",
+    "lt3200",
+    "lt6400",
+    "lt12800",
+    "lt25600",
+    "lt51200",
+    "lt102400",
+    "ge102400",
+)
 REGION_BASE_URLS: tuple[str, ...] = (
     "https://api-us-central1.quillrouter.com/v1",
     "https://api-us-east4.quillrouter.com/v1",

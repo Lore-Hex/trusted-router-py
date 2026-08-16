@@ -7,6 +7,7 @@ candidate-index references live in this module.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
@@ -39,6 +40,13 @@ from trustedrouter._requests import (
 from trustedrouter._retry import RetryController, _new_idempotency_key
 from trustedrouter._routing import AsyncBaseUrlPool
 from trustedrouter._sse import _aiter_sse_chunks, _aiter_sse_events, _delta_text
+from trustedrouter._telemetry import (
+    NullSink,
+    RequestRecorder,
+    TelemetrySink,
+    endpoint_enum,
+    resolve_telemetry_enabled,
+)
 from trustedrouter._transport import arequest_with_retry, astream_events
 from trustedrouter.models import (
     ActivityList,
@@ -77,14 +85,18 @@ class AsyncTrustedRouter:
         client: httpx.AsyncClient | None = None,
         max_retries: int = 2,
         regional_failover: bool = True,
+        telemetry: bool | None = None,
         regional_affinity: bool | None = None,
         region_probe_timeout: float = DEFAULT_REGION_PROBE_TIMEOUT_SECONDS,
+        _telemetry_sink: TelemetrySink | None = None,
     ) -> None:
         """Async TrustedRouter client.
 
         The default client probes regional liveness endpoints once and stays
         pinned to the fastest healthy region. Custom `base_url` clients are
-        never probed or rewritten.
+        never probed or rewritten. `telemetry` controls content-free client
+        reliability recording and its per-attempt header, with custom hosts
+        defaulting off and the documented environment opt-outs honored.
         """
         use_regional_affinity = base_url is None and (
             client is None if regional_affinity is None else regional_affinity
@@ -97,6 +109,13 @@ class AsyncTrustedRouter:
         self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
         self._regional_failover = bool(regional_failover)
+        self._telemetry_enabled = resolve_telemetry_enabled(
+            telemetry,
+            base_url=self.base_url,
+            control_base_url=self.control_base_url,
+            environ=os.environ,
+        )
+        self._telemetry_sink = _telemetry_sink if _telemetry_sink is not None else NullSink()
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -144,6 +163,32 @@ class AsyncTrustedRouter:
         await self._pool.current()
         return self._controller(self._pool.snapshot)
 
+    def _recorder(
+        self,
+        *,
+        method: str,
+        path: str,
+        streaming: bool,
+        body: Mapping[str, Any] | None,
+        timeout: float | httpx.Timeout | None,
+    ) -> RequestRecorder | None:
+        if not self._telemetry_enabled:
+            return None
+        provider = body.get("provider") if body is not None else None
+        provider_pinned = (
+            isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
+        )
+        model = body.get("model") if body is not None else None
+        return RequestRecorder(
+            self._telemetry_sink,
+            endpoint=endpoint_enum(path),
+            method=method,
+            streaming=streaming,
+            provider_pinned=provider_pinned,
+            model=model if isinstance(model, str) else None,
+            configured_timeout=timeout if timeout is not None else self._client.timeout,
+        )
+
     async def request(
         self,
         method: str,
@@ -186,8 +231,21 @@ class AsyncTrustedRouter:
             controller = self._controller(provider)
         else:
             controller = await self._inference_controller()
+        recorder = (
+            self._recorder(
+                method=method,
+                path=path,
+                streaming=False,
+                body=json,
+                timeout=timeout,
+            )
+            if _base_url is None
+            else None
+        )
         return _json_or_raise(
-            await arequest_with_retry(self._client, controller, method, path, kwargs)
+            await arequest_with_retry(
+                self._client, controller, method, path, kwargs, recorder=recorder
+            )
         )
 
     async def _control_request(
@@ -289,7 +347,16 @@ class AsyncTrustedRouter:
             return gen()
 
         controller = await self._inference_controller()
-        async for item in astream_events(self._client, controller, build_request, iter_body):
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
+        async for item in astream_events(
+            self._client, controller, build_request, iter_body, recorder=recorder
+        ):
             yield item
 
     async def chat_completions_chunk_stream(
@@ -324,7 +391,16 @@ class AsyncTrustedRouter:
             return gen()
 
         controller = await self._inference_controller()
-        async for item in astream_events(self._client, controller, build_request, iter_body):
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
+        async for item in astream_events(
+            self._client, controller, build_request, iter_body, recorder=recorder
+        ):
             yield item
 
     async def chat_completions_raw_stream(
@@ -356,7 +432,16 @@ class AsyncTrustedRouter:
             return response.aiter_bytes()
 
         controller = await self._inference_controller()
-        async for item in astream_events(self._client, controller, build_request, iter_body):
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
+        async for item in astream_events(
+            self._client, controller, build_request, iter_body, recorder=recorder
+        ):
             yield item
 
     async def chat_completions(
@@ -386,9 +471,18 @@ class AsyncTrustedRouter:
             return _aiter_sse_chunks(response)
 
         controller = await self._inference_controller()
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
         chunks = [
             chunk
-            async for chunk in astream_events(self._client, controller, build_request, iter_body)
+            async for chunk in astream_events(
+                self._client, controller, build_request, iter_body, recorder=recorder
+            )
         ]
         return ChatCompletion.model_validate(_collect_completion(chunks))
 
@@ -590,8 +684,19 @@ class AsyncTrustedRouter:
             timeout=timeout,
         )
         controller = await self._inference_controller()
+        recorder = self._recorder(
+            method="POST",
+            path="/responses",
+            streaming=True,
+            body=body,
+            timeout=timeout,
+        )
         async for event in astream_events(
-            self._client, controller, build_request, _aiter_sse_events
+            self._client,
+            controller,
+            build_request,
+            _aiter_sse_events,
+            recorder=recorder,
         ):
             yield event
 
@@ -629,7 +734,16 @@ class AsyncTrustedRouter:
             return response.aiter_bytes()
 
         controller = await self._inference_controller()
-        async for chunk in astream_events(self._client, controller, build_request, iter_body):
+        recorder = self._recorder(
+            method="POST",
+            path="/responses",
+            streaming=True,
+            body=body,
+            timeout=timeout,
+        )
+        async for chunk in astream_events(
+            self._client, controller, build_request, iter_body, recorder=recorder
+        ):
             yield chunk
 
     async def responses_input_tokens(

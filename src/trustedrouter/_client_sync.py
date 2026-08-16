@@ -8,6 +8,7 @@ references live in this module.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
@@ -41,6 +42,13 @@ from trustedrouter._requests import (
 from trustedrouter._retry import RetryController, _new_idempotency_key
 from trustedrouter._routing import BaseUrlPool
 from trustedrouter._sse import _delta_text, _iter_sse_chunks, _iter_sse_events
+from trustedrouter._telemetry import (
+    NullSink,
+    RequestRecorder,
+    TelemetrySink,
+    endpoint_enum,
+    resolve_telemetry_enabled,
+)
 from trustedrouter._transport import request_with_retry, stream_events
 from trustedrouter.models import (
     ActivityList,
@@ -74,8 +82,10 @@ class TrustedRouter:
         client: httpx.Client | None = None,
         max_retries: int = 2,
         regional_failover: bool = True,
+        telemetry: bool | None = None,
         regional_affinity: bool | None = None,
         region_probe_timeout: float = DEFAULT_REGION_PROBE_TIMEOUT_SECONDS,
+        _telemetry_sink: TelemetrySink | None = None,
     ) -> None:
         """Sync TrustedRouter client.
 
@@ -91,7 +101,11 @@ class TrustedRouter:
         The default client probes published regional liveness endpoints once,
         pins the lowest-latency healthy region, and retains the other regions
         plus the apex for idempotent failover. Pass a custom `base_url` or set
-        `regional_affinity=False` to disable this selection."""
+        `regional_affinity=False` to disable this selection.
+
+        `telemetry` controls content-free client reliability recording and its
+        per-attempt header. It defaults off for custom inference or control
+        hosts and honors the documented environment opt-out precedence."""
         use_regional_affinity = base_url is None and (
             client is None if regional_affinity is None else regional_affinity
         )
@@ -103,6 +117,13 @@ class TrustedRouter:
         self.workspace_id = workspace_id
         self.max_retries = max(0, int(max_retries))
         self._regional_failover = bool(regional_failover)
+        self._telemetry_enabled = resolve_telemetry_enabled(
+            telemetry,
+            base_url=self.base_url,
+            control_base_url=self.control_base_url,
+            environ=os.environ,
+        )
+        self._telemetry_sink = _telemetry_sink if _telemetry_sink is not None else NullSink()
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -142,6 +163,32 @@ class TrustedRouter:
 
     def _inference_controller(self) -> RetryController:
         return self._controller(self._pool.current)
+
+    def _recorder(
+        self,
+        *,
+        method: str,
+        path: str,
+        streaming: bool,
+        body: Mapping[str, Any] | None,
+        timeout: float | httpx.Timeout | None,
+    ) -> RequestRecorder | None:
+        if not self._telemetry_enabled:
+            return None
+        provider = body.get("provider") if body is not None else None
+        provider_pinned = (
+            isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
+        )
+        model = body.get("model") if body is not None else None
+        return RequestRecorder(
+            self._telemetry_sink,
+            endpoint=endpoint_enum(path),
+            method=method,
+            streaming=streaming,
+            provider_pinned=provider_pinned,
+            model=model if isinstance(model, str) else None,
+            configured_timeout=timeout if timeout is not None else self._client.timeout,
+        )
 
     def request(
         self,
@@ -188,8 +235,21 @@ class TrustedRouter:
             controller = self._controller(provider)
         else:
             controller = self._inference_controller()
+        recorder = (
+            self._recorder(
+                method=method,
+                path=path,
+                streaming=False,
+                body=json,
+                timeout=timeout,
+            )
+            if _base_url is None
+            else None
+        )
         return _json_or_raise(
-            request_with_retry(self._client, controller, method, path, kwargs)
+            request_with_retry(
+                self._client, controller, method, path, kwargs, recorder=recorder
+            )
         )
 
     def _control_request(
@@ -270,8 +330,19 @@ class TrustedRouter:
                 if txt:
                     yield txt
 
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
         yield from stream_events(
-            self._client, self._inference_controller(), build_request, iter_body
+            self._client,
+            self._inference_controller(),
+            build_request,
+            iter_body,
+            recorder=recorder,
         )
 
     def chat_completions_chunk_stream(
@@ -307,8 +378,19 @@ class TrustedRouter:
             for chunk in _iter_sse_chunks(response):
                 yield ChatCompletionChunk.model_validate(chunk)
 
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
         yield from stream_events(
-            self._client, self._inference_controller(), build_request, iter_body
+            self._client,
+            self._inference_controller(),
+            build_request,
+            iter_body,
+            recorder=recorder,
         )
 
     def chat_completions(
@@ -340,9 +422,20 @@ class TrustedRouter:
                 base_url=base_url,
             )
 
+        recorder = self._recorder(
+            method="POST",
+            path="/chat/completions",
+            streaming=True,
+            body={"model": model, **params},
+            timeout=timeout,
+        )
         chunks = list(
             stream_events(
-                self._client, self._inference_controller(), build_request, _iter_sse_chunks
+                self._client,
+                self._inference_controller(),
+                build_request,
+                _iter_sse_chunks,
+                recorder=recorder,
             )
         )
         return ChatCompletion.model_validate(_collect_completion(chunks))
@@ -556,8 +649,19 @@ class TrustedRouter:
             workspace_id=workspace_id,
             timeout=timeout,
         )
+        recorder = self._recorder(
+            method="POST",
+            path="/responses",
+            streaming=True,
+            body=body,
+            timeout=timeout,
+        )
         yield from stream_events(
-            self._client, self._inference_controller(), build_request, _iter_sse_events
+            self._client,
+            self._inference_controller(),
+            build_request,
+            _iter_sse_events,
+            recorder=recorder,
         )
 
     def responses_raw_stream(
@@ -593,8 +697,19 @@ class TrustedRouter:
         def iter_body(response: httpx.Response) -> Iterator[bytes]:
             yield from response.iter_bytes()
 
+        recorder = self._recorder(
+            method="POST",
+            path="/responses",
+            streaming=True,
+            body=body,
+            timeout=timeout,
+        )
         yield from stream_events(
-            self._client, self._inference_controller(), build_request, iter_body
+            self._client,
+            self._inference_controller(),
+            build_request,
+            iter_body,
+            recorder=recorder,
         )
 
     def responses_input_tokens(
