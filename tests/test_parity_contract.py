@@ -19,6 +19,90 @@ from trustedrouter import (
     selector_tool,
     subagent_tool,
 )
+from trustedrouter._constants import (
+    DEFAULT_TELEMETRY_PATH,
+    TELEMETRY_ENDPOINTS,
+    TELEMETRY_ERROR_CLASSES,
+    TELEMETRY_FINAL_OUTCOMES,
+    TELEMETRY_HOSTS,
+    TELEMETRY_LATENCY_BUCKETS,
+    TELEMETRY_OUTCOMES,
+    TELEMETRY_SCHEMA_VERSION,
+    TELEMETRY_TIMEOUT_PHASES,
+)
+
+
+def test_client_telemetry_contract_constants() -> None:
+    assert TELEMETRY_SCHEMA_VERSION == 1
+    assert DEFAULT_TELEMETRY_PATH == "/client-events"
+    assert TELEMETRY_HOSTS == (
+        "apex",
+        "ally",
+        "uptime",
+        "us_central1",
+        "us_east4",
+        "europe_west4",
+        "control",
+        "custom",
+    )
+    assert TELEMETRY_ENDPOINTS == (
+        "chat_completions",
+        "messages",
+        "responses",
+        "embeddings",
+        "images",
+        "videos",
+        "models",
+        "fusion",
+        "control_other",
+        "inference_other",
+    )
+    assert TELEMETRY_OUTCOMES == (
+        "ok",
+        "http_error",
+        "transport_error",
+        "timeout",
+        "stream_broken",
+        "aborted",
+    )
+    assert TELEMETRY_FINAL_OUTCOMES == (*TELEMETRY_OUTCOMES, "exhausted")
+    assert TELEMETRY_ERROR_CLASSES == (
+        "dns",
+        "tls",
+        "connect_refused",
+        "connect_timeout",
+        "connect_error",
+        "read_timeout",
+        "write_timeout",
+        "pool_timeout",
+        "protocol_error",
+        "reset",
+        "io_error",
+        "proxy_error",
+        "stream_stalled",
+        "unknown",
+    )
+    assert TELEMETRY_TIMEOUT_PHASES == (
+        "none",
+        "connect",
+        "first_byte",
+        "idle",
+        "total",
+    )
+    assert TELEMETRY_LATENCY_BUCKETS == (
+        "lt100",
+        "lt200",
+        "lt400",
+        "lt800",
+        "lt1600",
+        "lt3200",
+        "lt6400",
+        "lt12800",
+        "lt25600",
+        "lt51200",
+        "lt102400",
+        "ge102400",
+    )
 
 
 def test_stable_routing_and_orchestration_aliases() -> None:

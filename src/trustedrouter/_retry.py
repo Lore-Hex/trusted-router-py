@@ -233,6 +233,7 @@ class Decision:
 
     action: Literal["retry", "give_up"]
     sleep_seconds: float = 0.0
+    moved_host: bool = False
 
 
 _RETRY: Literal["retry"] = "retry"
@@ -263,6 +264,14 @@ class RetryController:
         self._attempt = 0
         self._base_index = 0
 
+    @property
+    def attempt(self) -> int:
+        return self._attempt
+
+    @property
+    def base_index(self) -> int:
+        return self._base_index
+
     def current_base_url(self) -> str:
         """The base URL for the upcoming attempt, re-reading the provider."""
         return self._base_urls()[self._base_index]
@@ -278,15 +287,17 @@ class RetryController:
         """
         if self._attempt >= self._max_retries or not _retryable(status_code, headers):
             return Decision(_GIVE_UP)
+        moved_host = False
         if (
             self._regional_failover
             and _regional_failoverable(status_code, headers)
             and self._base_index < len(self._base_urls()) - 1
         ):
             self._base_index += 1
+            moved_host = True
         sleep = _sleep_seconds(self._attempt, _retry_after_seconds(headers))
         self._attempt += 1
-        return Decision(_RETRY, sleep)
+        return Decision(_RETRY, sleep, moved_host)
 
     def on_transport_error(self, *, response_opened: bool) -> Decision:
         """Decide after the transport failed.
@@ -299,8 +310,10 @@ class RetryController:
         """
         if response_opened or self._attempt >= self._max_retries:
             return Decision(_GIVE_UP)
+        moved_host = False
         if self._regional_failover and self._base_index < len(self._base_urls()) - 1:
             self._base_index += 1
+            moved_host = True
         sleep = _sleep_seconds(self._attempt, None)
         self._attempt += 1
-        return Decision(_RETRY, sleep)
+        return Decision(_RETRY, sleep, moved_host)

@@ -60,9 +60,18 @@ from trustedrouter._errors import (
     _raise_for_stream_response,
     _transport_retry_error,
 )
-from trustedrouter._retry import RetryController
+from trustedrouter._retry import RetryController, _retryable
+from trustedrouter._telemetry import RequestRecorder
 
 T = TypeVar("T")
+
+
+def _set_recorder_header(headers: dict[str, str], value: str | None) -> None:
+    for key in tuple(headers):
+        if key.lower() == "x-tr-client":
+            del headers[key]
+    if value is not None:
+        headers["x-tr-client"] = value
 
 
 def request_with_retry(
@@ -71,6 +80,8 @@ def request_with_retry(
     method: str,
     path: str,
     kwargs: dict[str, Any],
+    *,
+    recorder: RequestRecorder | None = None,
 ) -> httpx.Response:
     """Sync buffered driver.
 
@@ -82,20 +93,53 @@ def request_with_retry(
     ``max_retries=0`` makes exactly one attempt
     (tests/test_features.py::test_max_retries_zero_disables_retry_loop_entirely).
     """
-    while True:
-        url = f"{controller.current_base_url()}/{path.lstrip('/')}"
-        try:
-            response = client.request(method, url, **kwargs)
-        except httpx.TransportError as exc:
-            decision = controller.on_transport_error(response_opened=False)
+    if recorder is not None:
+        kwargs = dict(kwargs)
+        attempt_headers = dict(kwargs.get("headers") or {})
+        kwargs["headers"] = attempt_headers
+    exhausted = False
+    try:
+        while True:
+            base_url = controller.current_base_url()
+            url = f"{base_url}/{path.lstrip('/')}"
+            if recorder is not None:
+                recorder.begin_attempt(base_url)
+                _set_recorder_header(attempt_headers, recorder.header_value())
+            try:
+                response = client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if recorder is not None:
+                    recorder.on_transport_error(
+                        exc, response_opened=False, body_started=False
+                    )
+                decision = controller.on_transport_error(response_opened=False)
+                if recorder is not None and decision.moved_host:
+                    recorder.on_moved()
+                if decision.action != "retry":
+                    if recorder is not None:
+                        exhausted = controller.attempt > 0
+                    raise _transport_retry_error(exc) from exc
+                time.sleep(decision.sleep_seconds)
+                continue
+            if recorder is not None:
+                recorder.on_response(response.status_code, response.headers)
+            decision = controller.on_response(response.status_code, response.headers)
+            if recorder is not None and decision.moved_host:
+                recorder.on_moved()
             if decision.action != "retry":
-                raise _transport_retry_error(exc) from exc
+                if recorder is not None:
+                    exhausted = controller.attempt > 0 and _retryable(
+                        response.status_code, response.headers
+                    )
+                return response
             time.sleep(decision.sleep_seconds)
-            continue
-        decision = controller.on_response(response.status_code, response.headers)
-        if decision.action != "retry":
-            return response
-        time.sleep(decision.sleep_seconds)
+    except KeyboardInterrupt:
+        if recorder is not None:
+            recorder.on_aborted()
+        raise
+    finally:
+        if recorder is not None:
+            recorder.finish(exhausted=exhausted)
 
 
 async def arequest_with_retry(
@@ -104,22 +148,57 @@ async def arequest_with_retry(
     method: str,
     path: str,
     kwargs: dict[str, Any],
+    *,
+    recorder: RequestRecorder | None = None,
 ) -> httpx.Response:
     """Async twin of :func:`request_with_retry`."""
-    while True:
-        url = f"{controller.current_base_url()}/{path.lstrip('/')}"
-        try:
-            response = await client.request(method, url, **kwargs)
-        except httpx.TransportError as exc:
-            decision = controller.on_transport_error(response_opened=False)
+    if recorder is not None:
+        kwargs = dict(kwargs)
+        attempt_headers = dict(kwargs.get("headers") or {})
+        kwargs["headers"] = attempt_headers
+    exhausted = False
+    try:
+        while True:
+            base_url = controller.current_base_url()
+            url = f"{base_url}/{path.lstrip('/')}"
+            if recorder is not None:
+                recorder.begin_attempt(base_url)
+                _set_recorder_header(attempt_headers, recorder.header_value())
+            try:
+                response = await client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if recorder is not None:
+                    recorder.on_transport_error(
+                        exc, response_opened=False, body_started=False
+                    )
+                decision = controller.on_transport_error(response_opened=False)
+                if recorder is not None and decision.moved_host:
+                    recorder.on_moved()
+                if decision.action != "retry":
+                    if recorder is not None:
+                        exhausted = controller.attempt > 0
+                    raise _transport_retry_error(exc) from exc
+                await asyncio.sleep(decision.sleep_seconds)
+                continue
+            if recorder is not None:
+                recorder.on_response(response.status_code, response.headers)
+            decision = controller.on_response(response.status_code, response.headers)
+            if recorder is not None and decision.moved_host:
+                recorder.on_moved()
             if decision.action != "retry":
-                raise _transport_retry_error(exc) from exc
+                if recorder is not None:
+                    exhausted = controller.attempt > 0 and _retryable(
+                        response.status_code, response.headers
+                    )
+                return response
             await asyncio.sleep(decision.sleep_seconds)
-            continue
-        decision = controller.on_response(response.status_code, response.headers)
-        if decision.action != "retry":
-            return response
-        await asyncio.sleep(decision.sleep_seconds)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        if recorder is not None:
+            recorder.on_aborted()
+        raise
+    finally:
+        if recorder is not None:
+            recorder.finish(exhausted=exhausted)
 
 
 def stream_events(
@@ -127,6 +206,8 @@ def stream_events(
     controller: RetryController,
     build_request: Callable[[str], dict[str, Any]],
     iter_body: Callable[[httpx.Response], Iterator[T]],
+    *,
+    recorder: RequestRecorder | None = None,
 ) -> Iterator[T]:
     """Sync stream-open driver: a generator, so opening stays lazy.
 
@@ -137,26 +218,67 @@ def stream_events(
     except with ``response_opened=True`` and re-raises as
     ``_transport_retry_error`` — never a reconnect (invariant 6).
     """
-    while True:
-        req = build_request(controller.current_base_url())
-        response_opened = False
-        try:
-            with client.stream(**req) as response:
-                response_opened = True
-                if response.is_error:
-                    response.read()
-                    decision = controller.on_response(response.status_code, response.headers)
-                    if decision.action == "retry":
-                        time.sleep(decision.sleep_seconds)
-                        continue
-                    _raise_for_stream_response(response)
-                yield from iter_body(response)
-                return
-        except httpx.TransportError as exc:
-            decision = controller.on_transport_error(response_opened=response_opened)
-            if decision.action != "retry":
-                raise _transport_retry_error(exc) from exc
-            time.sleep(decision.sleep_seconds)
+    exhausted = False
+    try:
+        while True:
+            base_url = controller.current_base_url()
+            if recorder is not None:
+                recorder.begin_attempt(base_url)
+            req = build_request(base_url)
+            if recorder is not None:
+                req = dict(req)
+                attempt_headers = dict(req.get("headers") or {})
+                _set_recorder_header(attempt_headers, recorder.header_value())
+                req["headers"] = attempt_headers
+            response_opened = False
+            body_started = False
+            try:
+                with client.stream(**req) as response:
+                    response_opened = True
+                    if recorder is not None:
+                        recorder.on_response(response.status_code, response.headers)
+                    if response.is_error:
+                        response.read()
+                        decision = controller.on_response(response.status_code, response.headers)
+                        if recorder is not None and decision.moved_host:
+                            recorder.on_moved()
+                        if decision.action == "retry":
+                            time.sleep(decision.sleep_seconds)
+                            continue
+                        if recorder is not None:
+                            exhausted = controller.attempt > 0 and _retryable(
+                                response.status_code, response.headers
+                            )
+                        _raise_for_stream_response(response)
+                    for item in iter_body(response):
+                        if not body_started:
+                            body_started = True
+                            if recorder is not None:
+                                recorder.on_first_event()
+                        yield item
+                    return
+            except httpx.TransportError as exc:
+                if recorder is not None:
+                    recorder.on_transport_error(
+                        exc,
+                        response_opened=response_opened,
+                        body_started=body_started,
+                    )
+                decision = controller.on_transport_error(response_opened=response_opened)
+                if recorder is not None and decision.moved_host:
+                    recorder.on_moved()
+                if decision.action != "retry":
+                    if recorder is not None:
+                        exhausted = not response_opened and controller.attempt > 0
+                    raise _transport_retry_error(exc) from exc
+                time.sleep(decision.sleep_seconds)
+    except (GeneratorExit, KeyboardInterrupt):
+        if recorder is not None:
+            recorder.on_aborted()
+        raise
+    finally:
+        if recorder is not None:
+            recorder.finish(exhausted=exhausted)
 
 
 async def astream_events(
@@ -164,26 +286,68 @@ async def astream_events(
     controller: RetryController,
     build_request: Callable[[str], dict[str, Any]],
     iter_body: Callable[[httpx.Response], AsyncIterator[T]],
+    *,
+    recorder: RequestRecorder | None = None,
 ) -> AsyncIterator[T]:
     """Async twin of :func:`stream_events`."""
-    while True:
-        req = build_request(controller.current_base_url())
-        response_opened = False
-        try:
-            async with client.stream(**req) as response:
-                response_opened = True
-                if response.is_error:
-                    await response.aread()
-                    decision = controller.on_response(response.status_code, response.headers)
-                    if decision.action == "retry":
-                        await asyncio.sleep(decision.sleep_seconds)
-                        continue
-                    await _araise_for_stream_response(response)
-                async for item in iter_body(response):
-                    yield item
-                return
-        except httpx.TransportError as exc:
-            decision = controller.on_transport_error(response_opened=response_opened)
-            if decision.action != "retry":
-                raise _transport_retry_error(exc) from exc
-            await asyncio.sleep(decision.sleep_seconds)
+    exhausted = False
+    try:
+        while True:
+            base_url = controller.current_base_url()
+            if recorder is not None:
+                recorder.begin_attempt(base_url)
+            req = build_request(base_url)
+            if recorder is not None:
+                req = dict(req)
+                attempt_headers = dict(req.get("headers") or {})
+                _set_recorder_header(attempt_headers, recorder.header_value())
+                req["headers"] = attempt_headers
+            response_opened = False
+            body_started = False
+            try:
+                async with client.stream(**req) as response:
+                    response_opened = True
+                    if recorder is not None:
+                        recorder.on_response(response.status_code, response.headers)
+                    if response.is_error:
+                        await response.aread()
+                        decision = controller.on_response(response.status_code, response.headers)
+                        if recorder is not None and decision.moved_host:
+                            recorder.on_moved()
+                        if decision.action == "retry":
+                            await asyncio.sleep(decision.sleep_seconds)
+                            continue
+                        if recorder is not None:
+                            exhausted = controller.attempt > 0 and _retryable(
+                                response.status_code, response.headers
+                            )
+                        await _araise_for_stream_response(response)
+                    async for item in iter_body(response):
+                        if not body_started:
+                            body_started = True
+                            if recorder is not None:
+                                recorder.on_first_event()
+                        yield item
+                    return
+            except httpx.TransportError as exc:
+                if recorder is not None:
+                    recorder.on_transport_error(
+                        exc,
+                        response_opened=response_opened,
+                        body_started=body_started,
+                    )
+                decision = controller.on_transport_error(response_opened=response_opened)
+                if recorder is not None and decision.moved_host:
+                    recorder.on_moved()
+                if decision.action != "retry":
+                    if recorder is not None:
+                        exhausted = not response_opened and controller.attempt > 0
+                    raise _transport_retry_error(exc) from exc
+                await asyncio.sleep(decision.sleep_seconds)
+    except (GeneratorExit, asyncio.CancelledError, KeyboardInterrupt):
+        if recorder is not None:
+            recorder.on_aborted()
+        raise
+    finally:
+        if recorder is not None:
+            recorder.finish(exhausted=exhausted)
