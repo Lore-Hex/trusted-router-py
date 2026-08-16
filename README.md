@@ -260,6 +260,29 @@ Disable with `max_retries=0`:
 client = TrustedRouter(api_key="...", max_retries=0)   # raise immediately on transient
 ```
 
+## Telemetry
+
+TrustedRouter reports content-free client reliability telemetry by default when
+both inference and control use TrustedRouter hosts, so failures in DNS, TLS,
+connection setup, and broken streams can be measured even when the server never
+sees the request. Exact minute counters describe outcomes and bounded latency
+histograms, while sampled diagnostics describe closed-enum attempt, retry,
+failover, timeout, SDK, runtime, OS, and architecture fields. Delivery runs on a
+separate daemon thread and HTTP client, retains counters for up to 24 hours and
+512 KiB through outages, sends one bounded batch at a time, and never delays or
+retries an inference request.
+
+Disable both telemetry delivery and the `x-tr-client` header with
+`TrustedRouter(..., telemetry=False)`, `TRUSTEDROUTER_TELEMETRY=0`, or
+`DO_NOT_TRACK=1`; custom inference or control hosts default to disabled. Set
+`TRUSTEDROUTER_TELEMETRY_DEBUG=1` to echo the exact outbound batch JSON to
+stderr, and use `telemetry_sample_rate=` to lower or raise random sampling of
+otherwise healthy first-attempt calls. See the complete disclosure at
+[trustedrouter.com/docs/telemetry](https://trustedrouter.com/docs/telemetry).
+
+Telemetry never sends prompts, completions, message text, workspace/key/user/
+session IDs, IP addresses, or hostnames of custom endpoints.
+
 ## Per-call extras
 
 Every chat method (and `request()` for ad-hoc paths) accepts:
