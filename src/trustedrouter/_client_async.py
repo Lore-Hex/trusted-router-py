@@ -8,6 +8,7 @@ candidate-index references live in this module.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
@@ -41,11 +42,12 @@ from trustedrouter._retry import RetryController, _new_idempotency_key
 from trustedrouter._routing import AsyncBaseUrlPool
 from trustedrouter._sse import _aiter_sse_chunks, _aiter_sse_events, _delta_text
 from trustedrouter._telemetry import (
-    NullSink,
     RequestRecorder,
+    TelemetryReporter,
     TelemetrySink,
     endpoint_enum,
     resolve_telemetry_enabled,
+    sdk_identity,
 )
 from trustedrouter._transport import arequest_with_retry, astream_events
 from trustedrouter.models import (
@@ -86,6 +88,7 @@ class AsyncTrustedRouter:
         max_retries: int = 2,
         regional_failover: bool = True,
         telemetry: bool | None = None,
+        telemetry_sample_rate: float = 0.01,
         regional_affinity: bool | None = None,
         region_probe_timeout: float = DEFAULT_REGION_PROBE_TIMEOUT_SECONDS,
         _telemetry_sink: TelemetrySink | None = None,
@@ -97,6 +100,9 @@ class AsyncTrustedRouter:
         never probed or rewritten. `telemetry` controls content-free client
         reliability recording and its per-attempt header, with custom hosts
         defaulting off and the documented environment opt-outs honored.
+        `telemetry_sample_rate` controls random sampling of otherwise healthy,
+        fast, first-attempt calls; failures, retries, and slow calls are always
+        retained.
         """
         use_regional_affinity = base_url is None and (
             client is None if regional_affinity is None else regional_affinity
@@ -115,7 +121,10 @@ class AsyncTrustedRouter:
             control_base_url=self.control_base_url,
             environ=os.environ,
         )
-        self._telemetry_sink = _telemetry_sink if _telemetry_sink is not None else NullSink()
+        self._telemetry_sample_rate = telemetry_sample_rate
+        self._telemetry_sink = _telemetry_sink
+        self._owns_telemetry_reporter = False
+        self._telemetry_lock = threading.Lock()
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
@@ -138,6 +147,10 @@ class AsyncTrustedRouter:
         )
 
     async def aclose(self) -> None:
+        if self._owns_telemetry_reporter and isinstance(
+            self._telemetry_sink, TelemetryReporter
+        ):
+            self._telemetry_sink.close()
         if self._owns_client:
             await self._client.aclose()
 
@@ -174,6 +187,17 @@ class AsyncTrustedRouter:
     ) -> RequestRecorder | None:
         if not self._telemetry_enabled:
             return None
+        if self._telemetry_sink is None:
+            with self._telemetry_lock:
+                if self._telemetry_sink is None:
+                    self._telemetry_sink = TelemetryReporter(
+                        control_base_url=self.control_base_url,
+                        api_key_provider=lambda: self.api_key,
+                        workspace_id=self.workspace_id,
+                        sdk_identity=sdk_identity(),
+                        success_sample_rate=self._telemetry_sample_rate,
+                    )
+                    self._owns_telemetry_reporter = True
         provider = body.get("provider") if body is not None else None
         provider_pinned = (
             isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
