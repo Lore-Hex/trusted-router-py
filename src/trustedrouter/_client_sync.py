@@ -39,6 +39,7 @@ from trustedrouter._requests import (
     _build_stream_request,
     _models_path,
     _responses_body,
+    _strip_reserved_headers,
 )
 from trustedrouter._retry import RetryController, _new_idempotency_key
 from trustedrouter._routing import BaseUrlPool
@@ -136,11 +137,17 @@ class TrustedRouter:
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
+        # x-tr-client is SDK-reserved: drop it here as well as per attempt, so
+        # a value in the client's OWN defaults cannot ride a request that
+        # records nothing -- httpx merges client headers under the per-request
+        # ones, where a dict has no way to delete them.
+        _strip_reserved_headers(default_headers)
         if client is not None:
             # Caller is responsible for the client's lifecycle (timeouts,
             # transport, cert pinning, etc.). close() becomes a no-op.
             self._client = client
             self._owns_client = False
+            _strip_reserved_headers(self._client.headers)
         else:
             self._client = httpx.Client(timeout=timeout, headers=default_headers)
             self._owns_client = True

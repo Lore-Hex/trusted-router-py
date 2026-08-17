@@ -60,16 +60,29 @@ from trustedrouter._errors import (
     _raise_for_stream_response,
     _transport_retry_error,
 )
+from trustedrouter._requests import _strip_reserved_headers
 from trustedrouter._retry import RetryController, _retryable
 from trustedrouter._telemetry import RequestRecorder
 
 T = TypeVar("T")
 
 
-def _set_recorder_header(headers: dict[str, str], value: str | None) -> None:
-    for key in tuple(headers):
-        if key.lower() == "x-tr-client":
-            del headers[key]
+def _apply_reserved_headers(
+    headers: dict[str, str], recorder: RequestRecorder | None
+) -> None:
+    """Enforce the x-tr-client reservation for one attempt.
+
+    The strip runs on EVERY path, recorder or not -- opt-out, custom base and
+    control-plane calls included -- so a caller-supplied value never reaches
+    the gateway; the header is then set only from an active recorder. Client
+    default headers are scrubbed once at construction (see
+    ``_requests._strip_reserved_headers``), because a request-level dict
+    cannot delete what httpx merges in from the client itself.
+    """
+    _strip_reserved_headers(headers)
+    if recorder is None:
+        return
+    value = recorder.header_value()
     if value is not None:
         headers["x-tr-client"] = value
 
@@ -93,10 +106,9 @@ def request_with_retry(
     ``max_retries=0`` makes exactly one attempt
     (tests/test_features.py::test_max_retries_zero_disables_retry_loop_entirely).
     """
-    if recorder is not None:
-        kwargs = dict(kwargs)
-        attempt_headers = dict(kwargs.get("headers") or {})
-        kwargs["headers"] = attempt_headers
+    kwargs = dict(kwargs)
+    attempt_headers = dict(kwargs.get("headers") or {})
+    kwargs["headers"] = attempt_headers
     exhausted = False
     try:
         while True:
@@ -104,7 +116,7 @@ def request_with_retry(
             url = f"{base_url}/{path.lstrip('/')}"
             if recorder is not None:
                 recorder.begin_attempt(base_url)
-                _set_recorder_header(attempt_headers, recorder.header_value())
+            _apply_reserved_headers(attempt_headers, recorder)
             try:
                 response = client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
@@ -152,10 +164,9 @@ async def arequest_with_retry(
     recorder: RequestRecorder | None = None,
 ) -> httpx.Response:
     """Async twin of :func:`request_with_retry`."""
-    if recorder is not None:
-        kwargs = dict(kwargs)
-        attempt_headers = dict(kwargs.get("headers") or {})
-        kwargs["headers"] = attempt_headers
+    kwargs = dict(kwargs)
+    attempt_headers = dict(kwargs.get("headers") or {})
+    kwargs["headers"] = attempt_headers
     exhausted = False
     try:
         while True:
@@ -163,7 +174,7 @@ async def arequest_with_retry(
             url = f"{base_url}/{path.lstrip('/')}"
             if recorder is not None:
                 recorder.begin_attempt(base_url)
-                _set_recorder_header(attempt_headers, recorder.header_value())
+            _apply_reserved_headers(attempt_headers, recorder)
             try:
                 response = await client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
@@ -224,12 +235,10 @@ def stream_events(
             base_url = controller.current_base_url()
             if recorder is not None:
                 recorder.begin_attempt(base_url)
-            req = build_request(base_url)
-            if recorder is not None:
-                req = dict(req)
-                attempt_headers = dict(req.get("headers") or {})
-                _set_recorder_header(attempt_headers, recorder.header_value())
-                req["headers"] = attempt_headers
+            req = dict(build_request(base_url))
+            attempt_headers = dict(req.get("headers") or {})
+            _apply_reserved_headers(attempt_headers, recorder)
+            req["headers"] = attempt_headers
             response_opened = False
             body_started = False
             try:
@@ -296,12 +305,10 @@ async def astream_events(
             base_url = controller.current_base_url()
             if recorder is not None:
                 recorder.begin_attempt(base_url)
-            req = build_request(base_url)
-            if recorder is not None:
-                req = dict(req)
-                attempt_headers = dict(req.get("headers") or {})
-                _set_recorder_header(attempt_headers, recorder.header_value())
-                req["headers"] = attempt_headers
+            req = dict(build_request(base_url))
+            attempt_headers = dict(req.get("headers") or {})
+            _apply_reserved_headers(attempt_headers, recorder)
+            req["headers"] = attempt_headers
             response_opened = False
             body_started = False
             try:

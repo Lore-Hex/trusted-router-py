@@ -176,6 +176,77 @@ def test_custom_base_and_opt_out_send_no_header_or_sink_call(
     assert sink.counters == []
 
 
+_STALE_CLIENT_HEADER = "v=1;a=7;po=http_error;pc=none;ph=apex;pm=1;sm=1;s=0;fo=0"
+
+
+@pytest.mark.parametrize("vector", ["per_call_headers", "injected_client_headers"])
+@pytest.mark.parametrize(
+    "path",
+    ["opt_out", "custom_base", "control_plane", "recording"],
+)
+def test_reserved_header_stripped_on_every_path(vector: str, path: str) -> None:
+    """x-tr-client is SDK-reserved: only the recorder may set it.
+
+    A stale or forged caller value -- from client default headers, per-call
+    headers, or an injected client's own headers -- never reaches the gateway
+    on any path, and an active recorder's value replaces it.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True, "data": []})
+
+    stale = {"x-tr-client": _STALE_CLIENT_HEADER}
+    sdk = TrustedRouter(
+        api_key="sk-test",
+        base_url="https://private.example/v1" if path == "custom_base" else None,
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            headers=stale if vector == "injected_client_headers" else None,
+        ),
+        regional_affinity=False,
+        telemetry={"opt_out": False, "recording": True}.get(path),
+        _telemetry_sink=RecordingSink(),
+    )
+    per_call = stale if vector == "per_call_headers" else None
+    if path == "control_plane":
+        assert sdk._control_request("GET", "/models", headers=per_call) == {
+            "ok": True,
+            "data": [],
+        }
+    else:
+        assert sdk.request(
+            "POST", "/responses", json={"model": "m"}, headers=per_call
+        ) == {"ok": True, "data": []}
+
+    expected = ["v=1;a=0;s=0"] if path == "recording" else [None]
+    assert seen == expected
+
+
+def test_reserved_header_is_scrubbed_from_client_default_headers() -> None:
+    """The strip also has to hold in the client's own header store.
+
+    httpx merges client default headers UNDER the per-request ones, and a
+    request-level dict has no way to delete what it merged, so a caller value
+    configured as a default (or carried by an injected client) is removed at
+    construction. Unreserved caller headers are untouched.
+    """
+    stale = {"x-tr-client": _STALE_CLIENT_HEADER, "x-caller-kept": "yes"}
+    sync_sdk = TrustedRouter(api_key="sk-test", regional_affinity=False, headers=stale)
+    async_sdk = AsyncTrustedRouter(
+        api_key="sk-test", regional_affinity=False, headers=stale
+    )
+    injected = TrustedRouter(
+        api_key="sk-test",
+        regional_affinity=False,
+        client=httpx.Client(headers=stale),
+    )
+    for client in (sync_sdk._client, async_sdk._client, injected._client):
+        assert "x-tr-client" not in client.headers
+        assert client.headers["x-caller-kept"] == "yes"
+
+
 def test_control_plane_call_is_never_traced() -> None:
     sink = RecordingSink()
     headers: list[str | None] = []
