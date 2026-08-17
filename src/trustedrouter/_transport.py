@@ -60,7 +60,7 @@ from trustedrouter._errors import (
     _raise_for_stream_response,
     _transport_retry_error,
 )
-from trustedrouter._requests import _strip_reserved_headers
+from trustedrouter._requests import _RESERVED_MARKER, _strip_reserved_headers
 from trustedrouter._retry import RetryController, _retryable
 from trustedrouter._telemetry import RequestRecorder
 
@@ -68,28 +68,30 @@ T = TypeVar("T")
 
 
 def _apply_reserved_headers(
-    headers: dict[str, str], recorder: RequestRecorder | None
+    request_kwargs: dict[str, Any], recorder: RequestRecorder | None
 ) -> None:
     """Enforce the x-tr-client reservation for one attempt.
 
     The strip runs on EVERY path, recorder or not -- opt-out, custom base and
     control-plane calls included -- so a value the SDK was handed never rides
-    the request; the header is then set only from an active recorder. Client
-    default headers are scrubbed once at construction (see
-    ``_requests._strip_reserved_headers``), because a request-level dict
-    cannot delete what httpx merges in from the client itself.
+    the request; the header is then set only from an active recorder.
 
-    That construction-time scrub is what closes the injected-client vector;
-    for the residual that an in-SDK scrub cannot reach at all (late mutation
-    of a caller-owned client, caller ``Auth``/request event hooks, and the
-    standalone ``trustedrouter.oauth`` helpers), see ``RESERVED_HEADERS``.
+    Also stamps ``extensions[_RESERVED_MARKER]`` with the value this attempt
+    must end up with, which is what lets the terminal hook installed on the
+    client re-assert the reservation after httpx has merged client default
+    headers and run the caller's ``Auth`` and request hooks. Marking per
+    attempt (not per request) keeps the value correct across retries, where
+    the recorder's header changes every time. See ``_requests.RESERVED_HEADERS``
+    for the layers and the remaining boundary.
     """
+    headers = request_kwargs["headers"]
     _strip_reserved_headers(headers)
-    if recorder is None:
-        return
-    value = recorder.header_value()
+    value = recorder.header_value() if recorder is not None else None
     if value is not None:
         headers["x-tr-client"] = value
+    extensions = dict(request_kwargs.get("extensions") or {})
+    extensions[_RESERVED_MARKER] = value
+    request_kwargs["extensions"] = extensions
 
 
 def request_with_retry(
@@ -121,7 +123,7 @@ def request_with_retry(
             url = f"{base_url}/{path.lstrip('/')}"
             if recorder is not None:
                 recorder.begin_attempt(base_url)
-            _apply_reserved_headers(attempt_headers, recorder)
+            _apply_reserved_headers(kwargs, recorder)
             try:
                 response = client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
@@ -179,7 +181,7 @@ async def arequest_with_retry(
             url = f"{base_url}/{path.lstrip('/')}"
             if recorder is not None:
                 recorder.begin_attempt(base_url)
-            _apply_reserved_headers(attempt_headers, recorder)
+            _apply_reserved_headers(kwargs, recorder)
             try:
                 response = await client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
@@ -241,9 +243,8 @@ def stream_events(
             if recorder is not None:
                 recorder.begin_attempt(base_url)
             req = dict(build_request(base_url))
-            attempt_headers = dict(req.get("headers") or {})
-            _apply_reserved_headers(attempt_headers, recorder)
-            req["headers"] = attempt_headers
+            req["headers"] = dict(req.get("headers") or {})
+            _apply_reserved_headers(req, recorder)
             response_opened = False
             body_started = False
             try:
@@ -311,9 +312,8 @@ async def astream_events(
             if recorder is not None:
                 recorder.begin_attempt(base_url)
             req = dict(build_request(base_url))
-            attempt_headers = dict(req.get("headers") or {})
-            _apply_reserved_headers(attempt_headers, recorder)
-            req["headers"] = attempt_headers
+            req["headers"] = dict(req.get("headers") or {})
+            _apply_reserved_headers(req, recorder)
             response_opened = False
             body_started = False
             try:

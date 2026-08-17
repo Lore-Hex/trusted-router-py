@@ -247,6 +247,137 @@ def test_reserved_header_is_scrubbed_from_client_default_headers() -> None:
         assert client.headers["x-caller-kept"] == "yes"
 
 
+def _forge(request: httpx.Request) -> None:
+    request.headers["x-tr-client"] = "alice@example.com"
+
+
+async def _aforge(request: httpx.Request) -> None:
+    _forge(request)
+
+
+class _ForgingAuth(httpx.Auth):
+    """A caller Auth flow that writes the reserved header."""
+
+    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+        _forge(request)
+        yield request
+
+
+@pytest.mark.parametrize("vector", ["late_default_mutation", "request_hook", "auth_flow"])
+@pytest.mark.parametrize("recording", [False, True])
+def test_reservation_holds_against_writers_downstream_of_the_scrub(
+    vector: str, recording: bool
+) -> None:
+    """The three writers that beat a per-request scrub must still lose.
+
+    httpx merges client defaults under the per-request headers, and runs the
+    caller's ``Auth`` flow and request event hooks INSIDE ``send()`` -- after
+    ``build_request()`` and after anything the driver wrote. So the reservation
+    is re-asserted by a terminal hook installed at construction: with telemetry
+    off the header must be absent, and with an active recorder the recorder's
+    value must survive rather than the forged one.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True, "data": []})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        event_hooks={"request": [_forge]} if vector == "request_hook" else None,
+        auth=_ForgingAuth() if vector == "auth_flow" else None,
+    )
+    sdk = TrustedRouter(
+        api_key="sk-test",
+        client=client,
+        regional_affinity=False,
+        telemetry=recording,
+        _telemetry_sink=RecordingSink(),
+    )
+    if vector == "late_default_mutation":
+        # Set AFTER construction, so the construction-time scrub cannot help.
+        client.headers["x-tr-client"] = "alice@example.com"
+
+    sdk.request("POST", "/responses", json={"model": "m"})
+
+    assert seen == (["v=1;a=0;s=0"] if recording else [None])
+
+
+def test_reservation_hook_ignores_requests_the_sdk_did_not_build() -> None:
+    """The terminal hook is scoped by an extensions marker, not global.
+
+    An injected client is usually shared with the caller's own traffic; the
+    reservation must not reach into requests the SDK never issued.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    TrustedRouter(api_key="sk-test", client=client, regional_affinity=False, telemetry=False)
+
+    client.get("https://elsewhere.example/", headers={"x-tr-client": "callers-own-business"})
+
+    assert seen == ["callers-own-business"]
+
+
+def test_reservation_holds_on_the_stream_driver_and_async_facade() -> None:
+    """The two drivers the PR deliberately did not restructure, plus async.
+
+    Both get the reservation from the same terminal hook, so a caller request
+    hook cannot forge the header on a stream open or on the async facade.
+    """
+    seen: list[str | None] = []
+
+    def stream_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    def json_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True, "data": []})
+
+    sync_sdk = TrustedRouter(
+        api_key="sk-test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(stream_handler), event_hooks={"request": [_forge]}
+        ),
+        regional_affinity=False,
+        telemetry=False,
+    )
+    list(
+        sync_sdk.chat_completions_chunk_stream(
+            model="m", messages=[{"role": "user", "content": "x"}]
+        )
+    )
+    assert seen == [None]
+
+    seen.clear()
+
+    async def drive() -> None:
+        async_sdk = AsyncTrustedRouter(
+            api_key="sk-test",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(json_handler), event_hooks={"request": [_aforge]}
+            ),
+            regional_affinity=False,
+            telemetry=False,
+        )
+        await async_sdk.request("GET", "/models")
+
+    import asyncio
+
+    asyncio.run(drive())
+    assert seen == [None]
+
+
 def test_control_plane_call_is_never_traced() -> None:
     sink = RecordingSink()
     headers: list[str | None] = []

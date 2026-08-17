@@ -35,6 +35,7 @@ from trustedrouter._requests import (
     _DEFAULT_USER_AGENT,
     _broadcast_destination_body,
     _build_stream_request,
+    _install_reserved_header_hook,
     _models_path,
     _responses_body,
     _strip_reserved_headers,
@@ -146,6 +147,10 @@ class AsyncTrustedRouter:
                 timeout=timeout, headers=default_headers, verify=verify
             )
             self._owns_client = True
+        # Terminal layer of the x-tr-client reservation: runs after the caller's
+        # Auth and request hooks, which are the only writers the per-attempt
+        # scrub above cannot see. Marked SDK requests only.
+        _install_reserved_header_hook(self._client, is_async=True)
         self._pool = AsyncBaseUrlPool(
             lambda: self._client,
             self.base_url,

@@ -24,36 +24,83 @@ caller default headers, per-call headers, or an injected client's own headers
 is stripped rather than sent -- on every path, including the ones that record
 nothing (opt-out, custom base, control plane).
 
-Boundary, and it is a real one: the reservation is enforced on everything the
-SDK builds, but an injected ``httpx.Client`` is caller-owned and gets the last
-write. httpx merges client default headers UNDER the per-request ones and
-offers no per-request delete, so the store itself is scrubbed at construction
-(closing the pre-construction vector); past that point three things still land
-after the SDK is done, and no in-SDK scrub can reach them:
+Enforcement is in three layers, because an injected ``httpx.Client`` is
+caller-owned and gets several chances to write the header after the SDK has
+built its request:
 
-* mutating ``client.headers`` AFTER the SDK was constructed;
-* a caller ``Auth`` flow, and a caller ``event_hooks["request"]`` hook -- both
-  run inside ``Client.send()``, i.e. after ``build_request()`` and after any
-  scrub the SDK could perform, so a hook can overwrite even an ACTIVE
-  recorder's value;
-* the standalone helpers in ``trustedrouter.oauth``, which take an injected
-  client directly and never see this module.
+1. the per-attempt request dict is scrubbed, then set from the recorder;
+2. the client's own header store is scrubbed at construction, because httpx
+   merges client default headers UNDER the per-request ones and offers no
+   per-request delete;
+3. a terminal request event hook (:func:`_install_reserved_header_hook`) runs
+   immediately before transport -- after the caller's ``Auth`` flow and after
+   any request hook they installed, which are the writers layers 1 and 2
+   cannot see -- and re-asserts the reservation for SDK requests only.
 
-This mirrors the boundary accepted for the Rust SDK, where reqwest merges
-default headers after the request has left the SDK entirely.
+Residual boundary, now genuinely narrow: a request hook the caller appends
+AFTER the SDK was constructed runs after ours and wins, and the standalone
+helpers in ``trustedrouter.oauth`` take an injected client directly and never
+reach this module.
+"""
+
+_RESERVED_MARKER = "trustedrouter_reserved"
+"""``Request.extensions`` key marking a request the SDK built.
+
+Carries the value the reservation must end up with: a recorder string, or
+``None`` meaning "no x-tr-client at all". Requests WITHOUT this marker belong
+to the caller's own traffic on a shared client and are left strictly alone.
 """
 
 
 def _strip_reserved_headers(headers: MutableMapping[str, str]) -> None:
     """Remove every reserved header, case-insensitively, in place.
 
-    Accepts a plain header dict or an ``httpx.Headers`` store (an injected
-    client's own defaults), because a request-level dict cannot delete a
-    header httpx merges in from the client.
+    Accepts a plain header dict, an ``httpx.Headers`` store (an injected
+    client's own defaults), or a fully merged ``httpx.Request``, because a
+    request-level dict cannot delete a header httpx merges in from the client.
     """
     for key in tuple(headers):
         if key.lower() in RESERVED_HEADERS:
             del headers[key]
+
+
+def _enforce_reserved_headers(request: httpx.Request) -> None:
+    """Re-assert the reservation on a fully built, post-Auth, post-hook request.
+
+    Runs as the SDK's terminal request event hook, making it the last write
+    before the transport. Only touches requests the SDK marked: an unmarked
+    request is the caller's other traffic on a client they also lent to us.
+    """
+    if _RESERVED_MARKER not in request.extensions:
+        return
+    expected = request.extensions[_RESERVED_MARKER]
+    _strip_reserved_headers(request.headers)
+    if expected is not None:
+        request.headers["x-tr-client"] = expected
+
+
+async def _aenforce_reserved_headers(request: httpx.Request) -> None:
+    """Async twin: httpx requires an awaitable hook on an ``AsyncClient``."""
+    _enforce_reserved_headers(request)
+
+
+def _install_reserved_header_hook(
+    client: httpx.Client | httpx.AsyncClient, *, is_async: bool
+) -> None:
+    """Append the terminal reservation hook to ``client``'s request hooks.
+
+    Appended rather than prepended so it runs AFTER any hook the caller already
+    configured; httpx runs request hooks after the ``Auth`` flow, so those two
+    -- the only writers that can beat the per-attempt scrub -- are both covered.
+    Touches the hook list once at construction, never per request, and the hook
+    itself only ever mutates request-local headers.
+    """
+    hook = _aenforce_reserved_headers if is_async else _enforce_reserved_headers
+    hooks = client.event_hooks.setdefault("request", [])
+    if hook not in hooks:
+        hooks.append(hook)
+    # Re-assign so httpx re-normalises its own copy of the mapping.
+    client.event_hooks = client.event_hooks
 
 
 def _user_agent() -> str:
