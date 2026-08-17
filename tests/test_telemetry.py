@@ -310,6 +310,29 @@ def test_retry_header_since_first_works_when_monotonic_clock_starts_at_zero(
     assert ";sm=200;" in (recorder.header_value() or "")
 
 
+def test_retry_header_is_suppressed_above_the_attempt_grammar_bound() -> None:
+    recorder = RequestRecorder(
+        RecordingSink(),
+        endpoint="responses",
+        method="POST",
+        streaming=False,
+        provider_pinned=False,
+        model="m",
+        configured_timeout=120.0,
+    )
+    for _ in range(99):
+        recorder.begin_attempt(DEFAULT_API_BASE_URL)
+        recorder.on_response(503, {})
+    recorder.begin_attempt(DEFAULT_API_BASE_URL)
+    assert ";a=99;" in (recorder.header_value() or "")
+    recorder.on_response(503, {})
+    for _ in range(2):
+        recorder.begin_attempt(DEFAULT_API_BASE_URL)
+        assert recorder.header_value() is None
+        recorder.on_response(503, {})
+    recorder.finish(exhausted=True)
+
+
 class _BrokenBody(httpx.SyncByteStream):
     def __iter__(self) -> Iterator[bytes]:
         yield b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'

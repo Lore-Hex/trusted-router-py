@@ -1309,6 +1309,11 @@ class RequestRecorder:
     def header_value(self) -> str | None:
         if self._current_host == "custom" or self._current_index is None:
             return None
+        # The contract (v1, section 3.2) caps `a` at 0..99 and the enclave drops
+        # the whole header on an out-of-range value, so suppress it entirely
+        # past the bound -- matching the sibling SDKs.
+        if self._current_index > 99:
+            return None
         values = ["v=1", f"a={self._current_index}"]
         if self._current_index:
             previous = self.attempts[-1]
