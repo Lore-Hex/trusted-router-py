@@ -96,6 +96,37 @@ def test_buffered_retry_header_and_record_capture_client_observations(
     assert [counter[0][0] for counter in sink.counters[1:]] == ["attempt", "attempt"]
 
 
+def test_forced_retry_of_a_success_reports_po_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sub-400 response retried on x-should-retry: true leaves the previous
+    outcome "ok" -- outside the po vocabulary of contract v1 section 3.2 --
+    so the retry attempt's header must map it to po=none;pc=none rather than
+    shipping a value the enclave drops the whole header for."""
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    sink = RecordingSink()
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                headers={"x-should-retry": "true"},
+                json={"retry": True},
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    sdk = _client(handler, sink, max_retries=1)
+    assert sdk.request("POST", "/responses", json={"model": "m"}) == {"ok": True}
+
+    assert seen[0] == "v=1;a=0;s=0"
+    retry_header = seen[1]
+    assert retry_header is not None
+    assert ";a=1;" in retry_header
+    assert ";po=none;pc=none;" in retry_header
+
+
 def test_exhausted_retryable_status_is_recorded_before_the_error_is_raised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
