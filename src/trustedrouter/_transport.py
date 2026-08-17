@@ -73,11 +73,16 @@ def _apply_reserved_headers(
     """Enforce the x-tr-client reservation for one attempt.
 
     The strip runs on EVERY path, recorder or not -- opt-out, custom base and
-    control-plane calls included -- so a caller-supplied value never reaches
-    the gateway; the header is then set only from an active recorder. Client
+    control-plane calls included -- so a value the SDK was handed never rides
+    the request; the header is then set only from an active recorder. Client
     default headers are scrubbed once at construction (see
     ``_requests._strip_reserved_headers``), because a request-level dict
     cannot delete what httpx merges in from the client itself.
+
+    That construction-time scrub is what closes the injected-client vector;
+    for the residual that an in-SDK scrub cannot reach at all (late mutation
+    of a caller-owned client, caller ``Auth``/request event hooks, and the
+    standalone ``trustedrouter.oauth`` helpers), see ``RESERVED_HEADERS``.
     """
     _strip_reserved_headers(headers)
     if recorder is None:

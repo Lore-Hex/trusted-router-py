@@ -17,13 +17,30 @@ from urllib.parse import urlencode
 import httpx
 
 RESERVED_HEADERS = frozenset({"x-tr-client"})
-"""Headers the SDK owns outright; a caller-supplied value never rides a request.
+"""Headers the SDK owns outright; only the telemetry recorder may set them.
 
-``x-tr-client`` is SDK-reserved in all six SDKs: only the telemetry recorder
-may set it, so a stale or forged value from caller default headers, per-call
-headers, or an injected client's own headers is stripped rather than sent --
-on every path, including the ones that record nothing (opt-out, custom base,
-control plane).
+``x-tr-client`` is SDK-reserved in all six SDKs: a stale or forged value from
+caller default headers, per-call headers, or an injected client's own headers
+is stripped rather than sent -- on every path, including the ones that record
+nothing (opt-out, custom base, control plane).
+
+Boundary, and it is a real one: the reservation is enforced on everything the
+SDK builds, but an injected ``httpx.Client`` is caller-owned and gets the last
+write. httpx merges client default headers UNDER the per-request ones and
+offers no per-request delete, so the store itself is scrubbed at construction
+(closing the pre-construction vector); past that point three things still land
+after the SDK is done, and no in-SDK scrub can reach them:
+
+* mutating ``client.headers`` AFTER the SDK was constructed;
+* a caller ``Auth`` flow, and a caller ``event_hooks["request"]`` hook -- both
+  run inside ``Client.send()``, i.e. after ``build_request()`` and after any
+  scrub the SDK could perform, so a hook can overwrite even an ACTIVE
+  recorder's value;
+* the standalone helpers in ``trustedrouter.oauth``, which take an injected
+  client directly and never see this module.
+
+This mirrors the boundary accepted for the Rust SDK, where reqwest merges
+default headers after the request has left the SDK entirely.
 """
 
 
