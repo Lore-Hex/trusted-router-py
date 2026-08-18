@@ -821,9 +821,12 @@ class TrustedRouter:
         cancel_url: str | None = None,
         idempotency_key: str | None = None,
     ) -> CheckoutSession:
-        """Create a Stripe checkout session. Pass `idempotency_key=` to
-        guarantee at-most-once charge semantics across network retries
-        — strongly recommended for production."""
+        """Create a Stripe checkout session.
+
+        The SDK mints one key for this logical call. Pass ``idempotency_key=``
+        to use a business-stable key that also deduplicates separate
+        application invocations.
+        """
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
             body["payment_method"] = payment_method

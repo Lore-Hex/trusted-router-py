@@ -36,9 +36,10 @@ built its request:
    mutated.
 
 Residual boundary, now genuinely narrow: a request hook the caller appends
-AFTER the SDK was constructed runs after ours and wins, and the standalone
-helpers in ``trustedrouter.oauth`` take an injected client directly and never
-reach this module.
+AFTER the SDK was constructed (or after a standalone helper's first use of the
+shared client) runs after ours and wins. Existing hooks are covered because the
+SDK appends its marker-aware terminal hook both at construction and before a
+standalone credential-free request.
 """
 
 _RESERVED_MARKER = "trustedrouter_reserved"
@@ -138,6 +139,12 @@ def _credential_free_request(
     cross-origin request.
     """
 
+    # Standalone helpers accept a caller-owned client without constructing an
+    # SDK facade. Install the same marker-scoped terminal hook here so an Auth
+    # flow or an already-configured request hook cannot re-add ambient secrets
+    # after the eager scrub below. Installation is idempotent, and unmarked
+    # traffic on the shared client remains untouched.
+    _install_reserved_header_hook(client, is_async=False)
     request = client.build_request(method, url, **kwargs)
     _strip_credentials(request.headers)
     _strip_reserved_headers(request.headers)
@@ -152,6 +159,7 @@ async def _acredential_free_request(
     url: str,
     **kwargs: Any,
 ) -> httpx.Response:
+    _install_reserved_header_hook(client, is_async=True)
     request = client.build_request(method, url, **kwargs)
     _strip_credentials(request.headers)
     _strip_reserved_headers(request.headers)

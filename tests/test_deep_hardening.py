@@ -7,6 +7,7 @@ import pytest
 
 from trustedrouter import InternalError, TrustedRouter
 from trustedrouter._collect import _collect_completion
+from trustedrouter._requests import _aenforce_reserved_headers, _enforce_reserved_headers
 from trustedrouter.oauth import exchange_oauth_key, exchange_oauth_key_async
 
 
@@ -166,7 +167,7 @@ def test_constructor_headers_apply_to_injected_client_without_mutating_it() -> N
     assert dict(injected.headers) == original
 
 
-def test_oauth_exchange_strips_injected_default_authorization_sync_and_async() -> None:
+def test_oauth_exchange_terminal_scrub_is_scoped_and_installed_once_sync() -> None:
     sensitive_headers = {
         "authorization": "Bearer ambient",
         "cookie": "session=ambient",
@@ -176,36 +177,79 @@ def test_oauth_exchange_strips_injected_default_authorization_sync_and_async() -
         "x-tr-client": "stale-telemetry",
         "x-trustedrouter-workspace": "stale-workspace",
     }
-    sync_seen: list[set[str]] = []
+    sensitive_names = set(sensitive_headers)
+    seen: list[tuple[str, set[str]]] = []
 
-    def sync_handler(request: httpx.Request) -> httpx.Response:
-        sync_seen.append(set(request.headers) & set(sensitive_headers))
+    def readd_credentials(request: httpx.Request) -> None:
+        request.headers.update(sensitive_headers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, set(request.headers) & sensitive_names))
         return httpx.Response(200, json={"key": "sk-delegated"})
 
-    sync_client = httpx.Client(
+    with httpx.Client(
         headers=sensitive_headers,
-        transport=httpx.MockTransport(sync_handler),
+        transport=httpx.MockTransport(handler),
         follow_redirects=True,
-    )
-    assert exchange_oauth_key(code="code", client=sync_client).key == "sk-delegated"
-    assert sync_seen == [set()]
+        event_hooks={"request": [readd_credentials]},
+    ) as client:
+        assert exchange_oauth_key(code="code", client=client).key == "sk-delegated"
+        assert client.event_hooks["request"].count(_enforce_reserved_headers) == 1
 
-    async_seen: list[set[str]] = []
+        # The hook is marker-scoped: sharing this client must not scrub the
+        # caller's own, unmarked request.
+        assert client.get("https://caller.example/unmarked").status_code == 200
 
-    def async_handler(request: httpx.Request) -> httpx.Response:
-        async_seen.append(set(request.headers) & set(sensitive_headers))
+        assert exchange_oauth_key(code="again", client=client).key == "sk-delegated"
+        assert client.event_hooks["request"].count(_enforce_reserved_headers) == 1
+
+    assert seen == [
+        ("/v1/auth/keys", set()),
+        ("/unmarked", sensitive_names),
+        ("/v1/auth/keys", set()),
+    ]
+
+
+def test_oauth_exchange_terminal_scrub_is_scoped_and_installed_once_async() -> None:
+    sensitive_headers = {
+        "authorization": "Bearer ambient",
+        "cookie": "session=ambient",
+        "idempotency-key": "stale-key",
+        "proxy-authorization": "Basic ambient",
+        "x-api-key": "ambient-api-key",
+        "x-tr-client": "stale-telemetry",
+        "x-trustedrouter-workspace": "stale-workspace",
+    }
+    sensitive_names = set(sensitive_headers)
+    seen: list[tuple[str, set[str]]] = []
+
+    async def readd_credentials(request: httpx.Request) -> None:
+        request.headers.update(sensitive_headers)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, set(request.headers) & sensitive_names))
         return httpx.Response(200, json={"key": "sk-delegated"})
-
-    async_client = httpx.AsyncClient(
-        headers=sensitive_headers,
-        transport=httpx.MockTransport(async_handler),
-        follow_redirects=True,
-    )
 
     async def run() -> None:
-        token = await exchange_oauth_key_async(code="code", client=async_client)
-        assert token.key == "sk-delegated"
-        await async_client.aclose()
+        async with httpx.AsyncClient(
+            headers=sensitive_headers,
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+            event_hooks={"request": [readd_credentials]},
+        ) as client:
+            token = await exchange_oauth_key_async(code="code", client=client)
+            assert token.key == "sk-delegated"
+            assert client.event_hooks["request"].count(_aenforce_reserved_headers) == 1
+
+            assert (await client.get("https://caller.example/unmarked")).status_code == 200
+
+            token = await exchange_oauth_key_async(code="again", client=client)
+            assert token.key == "sk-delegated"
+            assert client.event_hooks["request"].count(_aenforce_reserved_headers) == 1
 
     asyncio.run(run())
-    assert async_seen == [set()]
+    assert seen == [
+        ("/v1/auth/keys", set()),
+        ("/unmarked", sensitive_names),
+        ("/v1/auth/keys", set()),
+    ]

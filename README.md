@@ -260,6 +260,14 @@ Disable with `max_retries=0`:
 client = TrustedRouter(api_key="...", max_retries=0)   # raise immediately on transient
 ```
 
+Typed inference and control-plane mutation helpers mint one idempotency key at
+the logical call boundary and reuse it unchanged for every retry. The generic
+`client.request(...)` escape hatch deliberately does not guess whether an
+arbitrary write is idempotent: pass `idempotency_key=` explicitly if an unsafe
+method such as `POST` should be replayed after an ambiguous transport failure
+or an ordinary retryable status. A failure known to happen before any bytes
+were sent remains safe to retry without a key.
+
 ## Telemetry
 
 TrustedRouter reports content-free client reliability telemetry by default when
@@ -292,7 +300,7 @@ Every chat method (and `request()` for ad-hoc paths) accepts:
 | `api_key=` | override the instance bearer for this call only (threadsafe — used by validate_bearer) |
 | `extra_headers=` | dict of headers to merge in (trace IDs, custom routing) |
 | `workspace_id=` | sets `X-TrustedRouter-Workspace` for workspace-scoped management calls |
-| `idempotency_key=` | adds `Idempotency-Key:` so the gateway dedupes retries — **strongly recommended for billing** |
+| `idempotency_key=` | supplies the replay key; typed mutations auto-mint one when omitted, while generic `request()` does not |
 | `timeout=` | override the client-level timeout for this call |
 
 ```python
