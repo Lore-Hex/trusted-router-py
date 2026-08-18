@@ -1,0 +1,17 @@
+name: SDK conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    uses: Lore-Hex/trusted-router-sdk-conformance/.github/workflows/sdk-pr.yml@main
+    with:
+      sdk: python
+      allowed_skips: none
