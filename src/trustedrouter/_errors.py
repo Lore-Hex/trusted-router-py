@@ -105,12 +105,24 @@ def _transport_retry_error(exc: httpx.TransportError) -> InternalError:
     return InternalError(503, f"TrustedRouter endpoint unavailable: {exc!s}")
 
 
+def _stream_protocol_error(message: str, *, payload: Any | None = None) -> InternalError:
+    """Classify a corrupt/truncated successful HTTP stream as a gateway error.
+
+    The HTTP status is already 2xx by the time the SSE codec runs, but an
+    incomplete event stream is not a successful completion.  A synthetic 502
+    keeps the failure inside the SDK's typed hierarchy without suggesting that
+    the caller supplied an invalid request.
+    """
+
+    return InternalError(502, message, payload=payload)
+
+
 def _json_or_raise(response: httpx.Response) -> dict[str, Any]:
     retry_after = _retry_after_seconds(response.headers)
     try:
         payload = response.json()
     except ValueError as exc:
-        if response.is_error:
+        if not response.is_success:
             raise _classify_error(
                 response.status_code,
                 response.text[:240],
@@ -118,7 +130,7 @@ def _json_or_raise(response: httpx.Response) -> dict[str, Any]:
                 retry_after=retry_after,
             ) from exc
         raise
-    if response.is_error:
+    if not response.is_success:
         message = _error_message(payload)
         raise _classify_error(
             response.status_code, message, payload=payload, retry_after=retry_after

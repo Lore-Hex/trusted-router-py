@@ -44,7 +44,11 @@ class ChatMessage(_Base):
     role: str
     content: str | None = None
     name: str | None = None
+    reasoning: str | None = None
+    reasoning_content: str | None = None
+    refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    function_call: dict[str, Any] | None = None
     tool_call_id: str | None = None
 
 
@@ -77,7 +81,12 @@ class ChatCompletion(_Base):
 class ChatChoiceDelta(_Base):
     role: str | None = None
     content: str | None = None
+    name: str | None = None
+    reasoning: str | None = None
+    reasoning_content: str | None = None
+    refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    function_call: dict[str, Any] | None = None
 
 
 class ChatChoiceChunk(_Base):
@@ -96,6 +105,9 @@ class ChatCompletionChunk(_Base):
     created: int = 0
     model: str = ""
     choices: list[ChatChoiceChunk] = Field(default_factory=list)
+    usage: ChatUsage | None = None
+    system_fingerprint: str | None = None
+    service_tier: str | None = None
 
 
 # ---- catalog (models, providers, regions) -------------------------------

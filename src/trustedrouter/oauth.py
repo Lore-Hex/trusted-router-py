@@ -27,6 +27,7 @@ All network helpers raise the SDK's typed errors
 callers can discriminate failures the same way they do for inference
 calls.
 """
+
 from __future__ import annotations
 
 import base64
@@ -39,7 +40,11 @@ import httpx
 
 from trustedrouter._constants import DEFAULT_CONTROL_BASE_URL
 from trustedrouter._errors import _json_or_raise
-from trustedrouter._requests import _DEFAULT_USER_AGENT
+from trustedrouter._requests import (
+    _DEFAULT_USER_AGENT,
+    _acredential_free_request,
+    _credential_free_request,
+)
 
 # ---- low-level encoding helpers ------------------------------------------
 
@@ -158,9 +163,7 @@ def oauth_authorize_url(
     if code_challenge_method and not code_challenge:
         raise ValueError("code_challenge is required when code_challenge_method is set")
 
-    effective_callback = (
-        _callback_url_with_state(callback_url, state) if state else callback_url
-    )
+    effective_callback = _callback_url_with_state(callback_url, state) if state else callback_url
     params: dict[str, str] = {"callback_url": effective_callback}
     if code_challenge:
         params["code_challenge"] = code_challenge
@@ -269,10 +272,12 @@ def exchange_oauth_key(
     url = f"{base_url.rstrip('/')}/auth/keys"
     headers = {"user-agent": _DEFAULT_USER_AGENT}
     if client is not None:
-        response = client.post(url, json=body, headers=headers, timeout=timeout)
+        response = _credential_free_request(
+            client, "POST", url, json=body, headers=headers, timeout=timeout
+        )
     else:
         with httpx.Client(timeout=timeout) as owned:
-            response = owned.post(url, json=body, headers=headers)
+            response = _credential_free_request(owned, "POST", url, json=body, headers=headers)
     return _token_from_payload(_json_or_raise(response))
 
 
@@ -290,10 +295,14 @@ async def exchange_oauth_key_async(
     url = f"{base_url.rstrip('/')}/auth/keys"
     headers = {"user-agent": _DEFAULT_USER_AGENT}
     if client is not None:
-        response = await client.post(url, json=body, headers=headers, timeout=timeout)
+        response = await _acredential_free_request(
+            client, "POST", url, json=body, headers=headers, timeout=timeout
+        )
     else:
         async with httpx.AsyncClient(timeout=timeout) as owned:
-            response = await owned.post(url, json=body, headers=headers)
+            response = await _acredential_free_request(
+                owned, "POST", url, json=body, headers=headers
+            )
     return _token_from_payload(_json_or_raise(response))
 
 
@@ -317,10 +326,10 @@ def fetch_userinfo(
         "authorization": f"Bearer {api_key}",
     }
     if client is not None:
-        response = client.get(url, headers=headers, timeout=timeout)
+        response = client.get(url, headers=headers, timeout=timeout, follow_redirects=False)
     else:
         with httpx.Client(timeout=timeout) as owned:
-            response = owned.get(url, headers=headers)
+            response = owned.get(url, headers=headers, follow_redirects=False)
     return _userinfo_data(_json_or_raise(response))
 
 
@@ -338,10 +347,10 @@ async def fetch_userinfo_async(
         "authorization": f"Bearer {api_key}",
     }
     if client is not None:
-        response = await client.get(url, headers=headers, timeout=timeout)
+        response = await client.get(url, headers=headers, timeout=timeout, follow_redirects=False)
     else:
         async with httpx.AsyncClient(timeout=timeout) as owned:
-            response = await owned.get(url, headers=headers)
+            response = await owned.get(url, headers=headers, follow_redirects=False)
     return _userinfo_data(_json_or_raise(response))
 
 

@@ -115,6 +115,7 @@ async def test_async_client_pins_fastest_region_and_keeps_idempotency_on_failove
             "POST",
             "/chat/completions",
             json={},
+            idempotency_key="caller-key",
         )
     finally:
         await raw_client.aclose()
@@ -122,9 +123,7 @@ async def test_async_client_pins_fastest_region_and_keeps_idempotency_on_failove
     assert response["data"]["ok"] is True
     assert inference[0][0] == "api-us-east4.quillrouter.com"
     assert inference[1][0] != inference[0][0]
-    assert inference[0][1] is not None
-    assert inference[0][1].startswith("tr-req-")
-    assert inference[1][1] == inference[0][1]
+    assert [item[1] for item in inference] == ["caller-key", "caller-key"]
 
 
 def test_sync_stream_moves_regions_on_gateway_503_and_preserves_idempotency(

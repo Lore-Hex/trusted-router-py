@@ -29,13 +29,11 @@ caller-owned and gets several chances to write the header after the SDK has
 built its request:
 
 1. the per-attempt request dict is scrubbed, then set from the recorder;
-2. the client's own header store is scrubbed at construction, because httpx
-   merges client default headers UNDER the per-request ones and offers no
-   per-request delete;
-3. a terminal request event hook (:func:`_install_reserved_header_hook`) runs
+2. a terminal request event hook (:func:`_install_reserved_header_hook`) runs
    immediately before transport -- after the caller's ``Auth`` flow and after
-   any request hook they installed, which are the writers layers 1 and 2
-   cannot see -- and re-asserts the reservation for SDK requests only.
+   any request hook they installed -- and re-asserts the reservation for SDK
+   requests only.  The caller-owned client's global defaults are never
+   mutated.
 
 Residual boundary, now genuinely narrow: a request hook the caller appends
 AFTER the SDK was constructed runs after ours and wins, and the standalone
@@ -51,6 +49,18 @@ Carries the value the reservation must end up with: a recorder string, or
 to the caller's own traffic on a shared client and are left strictly alone.
 """
 
+_CREDENTIAL_FREE_MARKER = "trustedrouter_credential_free"
+_CREDENTIAL_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "idempotency-key",
+        "x-api-key",
+        "x-trustedrouter-workspace",
+    }
+)
+
 
 def _strip_reserved_headers(headers: MutableMapping[str, str]) -> None:
     """Remove every reserved header, case-insensitively, in place.
@@ -64,6 +74,12 @@ def _strip_reserved_headers(headers: MutableMapping[str, str]) -> None:
             del headers[key]
 
 
+def _strip_credentials(headers: MutableMapping[str, str]) -> None:
+    for key in tuple(headers):
+        if key.lower() in _CREDENTIAL_HEADERS:
+            del headers[key]
+
+
 def _enforce_reserved_headers(request: httpx.Request) -> None:
     """Re-assert the reservation on a fully built, post-Auth, post-hook request.
 
@@ -72,11 +88,15 @@ def _enforce_reserved_headers(request: httpx.Request) -> None:
     request is the caller's other traffic on a client they also lent to us.
     """
     if _RESERVED_MARKER not in request.extensions:
+        if request.extensions.get(_CREDENTIAL_FREE_MARKER) is True:
+            _strip_credentials(request.headers)
         return
     expected = request.extensions[_RESERVED_MARKER]
     _strip_reserved_headers(request.headers)
     if expected is not None:
         request.headers["x-tr-client"] = expected
+    if request.extensions.get(_CREDENTIAL_FREE_MARKER) is True:
+        _strip_credentials(request.headers)
 
 
 async def _aenforce_reserved_headers(request: httpx.Request) -> None:
@@ -101,6 +121,43 @@ def _install_reserved_header_hook(
         hooks.append(hook)
     # Re-assign so httpx re-normalises its own copy of the mapping.
     client.event_hooks = client.event_hooks
+
+
+def _credential_free_request(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Send one SDK metadata/OAuth request without ambient credentials.
+
+    ``httpx`` merges an injected client's default headers while building the
+    request.  Building first lets us remove that merged state locally; passing
+    ``auth=None`` also disables a configured client Auth object.  Redirects are
+    disabled so the credential-free boundary cannot silently become a second
+    cross-origin request.
+    """
+
+    request = client.build_request(method, url, **kwargs)
+    _strip_credentials(request.headers)
+    _strip_reserved_headers(request.headers)
+    request.extensions[_CREDENTIAL_FREE_MARKER] = True
+    request.extensions[_RESERVED_MARKER] = None
+    return client.send(request, auth=None, follow_redirects=False)
+
+
+async def _acredential_free_request(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    request = client.build_request(method, url, **kwargs)
+    _strip_credentials(request.headers)
+    _strip_reserved_headers(request.headers)
+    request.extensions[_CREDENTIAL_FREE_MARKER] = True
+    request.extensions[_RESERVED_MARKER] = None
+    return await client.send(request, auth=None, follow_redirects=False)
 
 
 def _user_agent() -> str:

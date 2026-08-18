@@ -61,10 +61,36 @@ from trustedrouter._errors import (
     _transport_retry_error,
 )
 from trustedrouter._requests import _RESERVED_MARKER, _strip_reserved_headers
-from trustedrouter._retry import RetryController, _retryable
+from trustedrouter._retry import RetryController, _retryable, _should_retry_header
 from trustedrouter._telemetry import RequestRecorder
 
 T = TypeVar("T")
+
+_REPLAY_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+
+def _has_idempotency_key(headers: dict[str, str]) -> bool:
+    return any(key.lower() == "idempotency-key" and bool(value) for key, value in headers.items())
+
+
+def _request_is_replayable(method: str, headers: dict[str, str]) -> bool:
+    return method.upper() in _REPLAY_SAFE_METHODS or _has_idempotency_key(headers)
+
+
+def _transport_failed_before_send(exc: httpx.TransportError) -> bool:
+    """Return true only for httpx failures that occur before HTTP bytes exist."""
+
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+
+
+def _response_retry_is_safe(
+    method: str,
+    request_headers: dict[str, str],
+    response_headers: httpx.Headers,
+) -> bool:
+    return _request_is_replayable(method, request_headers) or (
+        _should_retry_header(response_headers) is True
+    )
 
 
 def _apply_reserved_headers(
@@ -116,6 +142,10 @@ def request_with_retry(
     kwargs = dict(kwargs)
     attempt_headers = dict(kwargs.get("headers") or {})
     kwargs["headers"] = attempt_headers
+    # A redirect is a new request, outside the SDK retry policy and origin
+    # allowlist.  Pin this per request so an injected follow_redirects=True
+    # client cannot replay a prompt or credential-bearing mutation elsewhere.
+    kwargs["follow_redirects"] = False
     exhausted = False
     try:
         while True:
@@ -128,9 +158,12 @@ def request_with_retry(
                 response = client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
                 if recorder is not None:
-                    recorder.on_transport_error(
-                        exc, response_opened=False, body_started=False
-                    )
+                    recorder.on_transport_error(exc, response_opened=False, body_started=False)
+                if not (
+                    _request_is_replayable(method, attempt_headers)
+                    or _transport_failed_before_send(exc)
+                ):
+                    raise _transport_retry_error(exc) from exc
                 decision = controller.on_transport_error(response_opened=False)
                 if recorder is not None and decision.moved_host:
                     recorder.on_moved()
@@ -142,6 +175,10 @@ def request_with_retry(
                 continue
             if recorder is not None:
                 recorder.on_response(response.status_code, response.headers)
+            if _retryable(response.status_code, response.headers) and not _response_retry_is_safe(
+                method, attempt_headers, response.headers
+            ):
+                return response
             decision = controller.on_response(response.status_code, response.headers)
             if recorder is not None and decision.moved_host:
                 recorder.on_moved()
@@ -174,6 +211,7 @@ async def arequest_with_retry(
     kwargs = dict(kwargs)
     attempt_headers = dict(kwargs.get("headers") or {})
     kwargs["headers"] = attempt_headers
+    kwargs["follow_redirects"] = False
     exhausted = False
     try:
         while True:
@@ -186,9 +224,12 @@ async def arequest_with_retry(
                 response = await client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
                 if recorder is not None:
-                    recorder.on_transport_error(
-                        exc, response_opened=False, body_started=False
-                    )
+                    recorder.on_transport_error(exc, response_opened=False, body_started=False)
+                if not (
+                    _request_is_replayable(method, attempt_headers)
+                    or _transport_failed_before_send(exc)
+                ):
+                    raise _transport_retry_error(exc) from exc
                 decision = controller.on_transport_error(response_opened=False)
                 if recorder is not None and decision.moved_host:
                     recorder.on_moved()
@@ -200,6 +241,10 @@ async def arequest_with_retry(
                 continue
             if recorder is not None:
                 recorder.on_response(response.status_code, response.headers)
+            if _retryable(response.status_code, response.headers) and not _response_retry_is_safe(
+                method, attempt_headers, response.headers
+            ):
+                return response
             decision = controller.on_response(response.status_code, response.headers)
             if recorder is not None and decision.moved_host:
                 recorder.on_moved()
@@ -244,6 +289,7 @@ def stream_events(
                 recorder.begin_attempt(base_url)
             req = dict(build_request(base_url))
             req["headers"] = dict(req.get("headers") or {})
+            req["follow_redirects"] = False
             _apply_reserved_headers(req, recorder)
             response_opened = False
             body_started = False
@@ -252,12 +298,26 @@ def stream_events(
                     response_opened = True
                     if recorder is not None:
                         recorder.on_response(response.status_code, response.headers)
-                    if response.is_error:
-                        response.read()
+                    if not response.is_success:
+                        request_method = str(req.get("method", "GET"))
+                        if _retryable(
+                            response.status_code, response.headers
+                        ) and not _response_retry_is_safe(
+                            request_method, req["headers"], response.headers
+                        ):
+                            _raise_for_stream_response(response)
                         decision = controller.on_response(response.status_code, response.headers)
                         if recorder is not None and decision.moved_host:
                             recorder.on_moved()
                         if decision.action == "retry":
+                            # A diagnostic error body is not user-visible
+                            # stream data.  If it truncates after retryable
+                            # headers, close this attempt and spend the retry
+                            # already authorized by the status.
+                            try:
+                                response.read()
+                            except httpx.TransportError:
+                                pass
                             time.sleep(decision.sleep_seconds)
                             continue
                         if recorder is not None:
@@ -279,6 +339,12 @@ def stream_events(
                         response_opened=response_opened,
                         body_started=body_started,
                     )
+                request_method = str(req.get("method", "GET"))
+                if not response_opened and not (
+                    _request_is_replayable(request_method, req["headers"])
+                    or _transport_failed_before_send(exc)
+                ):
+                    raise _transport_retry_error(exc) from exc
                 decision = controller.on_transport_error(response_opened=response_opened)
                 if recorder is not None and decision.moved_host:
                     recorder.on_moved()
@@ -313,6 +379,7 @@ async def astream_events(
                 recorder.begin_attempt(base_url)
             req = dict(build_request(base_url))
             req["headers"] = dict(req.get("headers") or {})
+            req["follow_redirects"] = False
             _apply_reserved_headers(req, recorder)
             response_opened = False
             body_started = False
@@ -321,12 +388,22 @@ async def astream_events(
                     response_opened = True
                     if recorder is not None:
                         recorder.on_response(response.status_code, response.headers)
-                    if response.is_error:
-                        await response.aread()
+                    if not response.is_success:
+                        request_method = str(req.get("method", "GET"))
+                        if _retryable(
+                            response.status_code, response.headers
+                        ) and not _response_retry_is_safe(
+                            request_method, req["headers"], response.headers
+                        ):
+                            await _araise_for_stream_response(response)
                         decision = controller.on_response(response.status_code, response.headers)
                         if recorder is not None and decision.moved_host:
                             recorder.on_moved()
                         if decision.action == "retry":
+                            try:
+                                await response.aread()
+                            except httpx.TransportError:
+                                pass
                             await asyncio.sleep(decision.sleep_seconds)
                             continue
                         if recorder is not None:
@@ -348,6 +425,12 @@ async def astream_events(
                         response_opened=response_opened,
                         body_started=body_started,
                     )
+                request_method = str(req.get("method", "GET"))
+                if not response_opened and not (
+                    _request_is_replayable(request_method, req["headers"])
+                    or _transport_failed_before_send(exc)
+                ):
+                    raise _transport_retry_error(exc) from exc
                 decision = controller.on_transport_error(response_opened=response_opened)
                 if recorder is not None and decision.moved_host:
                     recorder.on_moved()

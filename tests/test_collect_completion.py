@@ -5,19 +5,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from trustedrouter import InternalError
 from trustedrouter.client import _collect_completion
 
 
-def test_empty_chunk_list_returns_minimal_assistant_envelope() -> None:
-    """Empty stream — the gateway hung up before yielding anything.
-    We must still return a parseable empty completion so callers don't
-    need to special-case None."""
-    result = _collect_completion([])
-    assert result["object"] == "chat.completion"
-    assert result["id"] == ""
-    assert result["choices"][0]["message"]["role"] == "assistant"
-    assert result["choices"][0]["message"]["content"] == ""
-    assert result["choices"][0]["finish_reason"] == "stop"
+def test_empty_chunk_list_is_a_protocol_error() -> None:
+    with pytest.raises(InternalError, match="empty completion stream"):
+        _collect_completion([])
 
 
 def test_concatenates_text_deltas_and_propagates_id_model_created() -> None:
@@ -67,16 +63,13 @@ def test_non_string_content_delta_is_ignored() -> None:
     assert result["choices"][0]["finish_reason"] == "stop"
 
 
-def test_finish_reason_falls_back_to_stop_when_never_set() -> None:
-    """Unterminated stream (provider didn't emit finish_reason) — we
-    default to "stop" so the response is well-formed for downstream
-    OpenAI-shape consumers."""
+def test_missing_finish_reason_is_preserved_instead_of_fabricated() -> None:
     chunks = [
         {"choices": [{"delta": {"content": "abc"}}]},
         {"choices": [{"delta": {"content": "def"}}]},
     ]
     result = _collect_completion(chunks)
-    assert result["choices"][0]["finish_reason"] == "stop"
+    assert result["choices"][0]["finish_reason"] is None
 
 
 def test_uses_last_seen_finish_reason() -> None:

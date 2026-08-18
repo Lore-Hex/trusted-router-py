@@ -808,9 +808,9 @@ class TelemetryReporter:
         if compatible is not None:
             previous = self._current_counters.pop(compatible)
             target = self._folded_counter_key(compatible, endpoint=True)
-            merged: dict[str, Any] = {}
-            _merge_counter_increment(merged, previous)
-            self._current_counters[target] = merged
+            endpoint_merged: dict[str, Any] = {}
+            _merge_counter_increment(endpoint_merged, previous)
+            self._current_counters[target] = endpoint_merged
             return target
         return next(iter(self._current_counters))
 
