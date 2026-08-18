@@ -37,6 +37,7 @@ from trustedrouter._requests import (
     _DEFAULT_USER_AGENT,
     _broadcast_destination_body,
     _build_stream_request,
+    _credential_free_request,
     _install_reserved_header_hook,
     _models_path,
     _responses_body,
@@ -138,17 +139,16 @@ class TrustedRouter:
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
-        # x-tr-client is SDK-reserved: drop it here as well as per attempt, so
-        # a value in the client's OWN defaults cannot ride a request that
-        # records nothing -- httpx merges client headers under the per-request
-        # ones, where a dict has no way to delete them.
+        # Constructor headers apply even when a caller injects a client; keep a
+        # request-local copy rather than mutating that caller-owned client's
+        # global defaults.
         _strip_reserved_headers(default_headers)
+        self._default_headers = dict(default_headers)
         if client is not None:
             # Caller is responsible for the client's lifecycle (timeouts,
             # transport, cert pinning, etc.). close() becomes a no-op.
             self._client = client
             self._owns_client = False
-            _strip_reserved_headers(self._client.headers)
         else:
             self._client = httpx.Client(timeout=timeout, headers=default_headers)
             self._owns_client = True
@@ -164,9 +164,7 @@ class TrustedRouter:
         )
 
     def close(self) -> None:
-        if self._owns_telemetry_reporter and isinstance(
-            self._telemetry_sink, TelemetryReporter
-        ):
+        if self._owns_telemetry_reporter and isinstance(self._telemetry_sink, TelemetryReporter):
             self._telemetry_sink.close()
         if self._owns_client:
             self._client.close()
@@ -212,9 +210,7 @@ class TrustedRouter:
                     )
                     self._owns_telemetry_reporter = True
         provider = body.get("provider") if body is not None else None
-        provider_pinned = (
-            isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
-        )
+        provider_pinned = isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
         model = body.get("model") if body is not None else None
         return RequestRecorder(
             self._telemetry_sink,
@@ -239,13 +235,10 @@ class TrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         _base_url: str | None = None,
     ) -> dict[str, Any]:
-        if (
-            idempotency_key is None
-            and _base_url is None
-            and method.upper() not in {"GET", "HEAD", "OPTIONS"}
-        ):
-            idempotency_key = _new_idempotency_key()
-        merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
+        # The generic escape hatch never invents replay semantics.  Typed
+        # billed/mutating helpers mint once at their call boundary; generic
+        # callers opt in explicitly with idempotency_key=.
+        merged_headers = dict(self._default_headers)
         if headers:
             merged_headers.update(headers)
         if idempotency_key:
@@ -283,9 +276,7 @@ class TrustedRouter:
             else None
         )
         return _json_or_raise(
-            request_with_retry(
-                self._client, controller, method, path, kwargs, recorder=recorder
-            )
+            request_with_retry(self._client, controller, method, path, kwargs, recorder=recorder)
         )
 
     def _control_request(
@@ -294,7 +285,20 @@ class TrustedRouter:
         path: str,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        if kwargs.get("idempotency_key") is None and method.upper() not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "TRACE",
+        }:
+            kwargs["idempotency_key"] = _new_idempotency_key()
         return self.request(method, path, _base_url=self.control_base_url, **kwargs)
+
+    def _merged_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+        merged = dict(self._default_headers)
+        if headers:
+            merged.update(headers)
+        return merged
 
     def _build_chat_request(
         self,
@@ -322,7 +326,7 @@ class TrustedRouter:
             f"{(base_url or self.base_url).rstrip('/')}/chat/completions",
             body=body,
             api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=extra_headers,
+            extra_headers=self._merged_headers(extra_headers),
             idempotency_key=idempotency_key,
             workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
             timeout=timeout,
@@ -551,6 +555,11 @@ class TrustedRouter:
         trace: Mapping[str, Any] | None = None,
         tags: Mapping[str, str] | None = None,
         provider: ProviderPreferences | Mapping[str, Any] | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> EmbeddingResponse:
         """OpenAI-compatible embeddings wrapper.
 
@@ -574,7 +583,18 @@ class TrustedRouter:
             body["tags"] = dict(tags)
         if provider is not None:
             body["provider"] = dict(provider)
-        return EmbeddingResponse.model_validate(self.request("POST", "/embeddings", json=body))
+        return EmbeddingResponse.model_validate(
+            self.request(
+                "POST",
+                "/embeddings",
+                json=body,
+                headers=extra_headers,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key or _new_idempotency_key(),
+                timeout=timeout,
+            )
+        )
 
     def messages(
         self,
@@ -582,6 +602,11 @@ class TrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         max_tokens: int = 1024,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> MessagesResponse:
         """Anthropic-shape Messages endpoint. For providers that expose
@@ -594,7 +619,18 @@ class TrustedRouter:
             "max_tokens": max_tokens,
             **params,
         }
-        return MessagesResponse.model_validate(self.request("POST", "/messages", json=body))
+        return MessagesResponse.model_validate(
+            self.request(
+                "POST",
+                "/messages",
+                json=body,
+                headers=extra_headers,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key or _new_idempotency_key(),
+                timeout=timeout,
+            )
+        )
 
     def responses(
         self,
@@ -647,7 +683,7 @@ class TrustedRouter:
                 f"{base_url}/responses",
                 body=body,
                 api_key=api_key if api_key is not None else self.api_key,
-                extra_headers=extra_headers,
+                extra_headers=self._merged_headers(extra_headers),
                 idempotency_key=idempotency_key,
                 workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
                 timeout=timeout,
@@ -755,6 +791,7 @@ class TrustedRouter:
         input: str | list[Mapping[str, Any]],
         instructions: str | None = None,
         workspace_id: str | None = None,
+        idempotency_key: str | None = None,
         **params: Any,
     ) -> ResponseInputTokens:
         body = _responses_body(
@@ -770,6 +807,7 @@ class TrustedRouter:
                 "/responses/input_tokens",
                 json=body,
                 workspace_id=workspace_id,
+                idempotency_key=idempotency_key or _new_idempotency_key(),
             )
         )
 
@@ -783,9 +821,12 @@ class TrustedRouter:
         cancel_url: str | None = None,
         idempotency_key: str | None = None,
     ) -> CheckoutSession:
-        """Create a Stripe checkout session. Pass `idempotency_key=` to
-        guarantee at-most-once charge semantics across network retries
-        — strongly recommended for production."""
+        """Create a Stripe checkout session.
+
+        The SDK mints one key for this logical call. Pass ``idempotency_key=``
+        to use a business-stable key that also deduplicates separate
+        application invocations.
+        """
         body: dict[str, Any] = {"amount": amount}
         if payment_method is not None:
             body["payment_method"] = payment_method
@@ -903,7 +944,7 @@ class TrustedRouter:
         )
 
     def status(self, url: str = DEFAULT_STATUS_URL) -> dict[str, Any]:
-        response = self._client.get(url)
+        response = _credential_free_request(self._client, "GET", url)
         return _json_or_raise(response)
 
     def attestation(self) -> bytes:
@@ -912,13 +953,13 @@ class TrustedRouter:
         `trustedrouter.attestation.verify_gateway_attestation` to verify."""
         # /attestation lives at the API root, not under /v1
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
-        response = self._client.get(url)
-        if response.is_error:
+        response = _credential_free_request(self._client, "GET", url)
+        if not response.is_success:
             raise TrustedRouterError(response.status_code, response.text[:240])
         return response.content
 
     def trust_release(self, url: str = DEFAULT_TRUST_RELEASE_URL) -> TrustRelease:
-        response = self._client.get(url)
+        response = _credential_free_request(self._client, "GET", url)
         return TrustRelease.model_validate(_json_or_raise(response))
 
 
@@ -930,4 +971,6 @@ def fetch_trust_release(
     """Fetch and parse the public trust release. Returns a typed
     `TrustRelease` model (use `.model_dump()` if you need a dict)."""
     with httpx.Client(timeout=timeout) as client:
-        return TrustRelease.model_validate(_json_or_raise(client.get(url)))
+        return TrustRelease.model_validate(
+            _json_or_raise(_credential_free_request(client, "GET", url))
+        )

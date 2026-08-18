@@ -318,7 +318,10 @@ def test_chat_stream_fails_over_before_returning_chunks(monkeypatch: pytest.Monk
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
-            content=b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n',
+            content=(
+                b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
         )
 
     sdk = TrustedRouter(
@@ -560,7 +563,10 @@ def test_chat_completions_preserves_explicit_idempotency_key() -> None:
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
-            content=b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}\n\n',
+            content=(
+                b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
         )
 
     sdk = TrustedRouter(
@@ -626,7 +632,10 @@ def test_chat_completions_workspace_override_is_header_not_body() -> None:
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
-            content=b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}\n\n',
+            content=(
+                b'data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
         )
 
     sdk = TrustedRouter(

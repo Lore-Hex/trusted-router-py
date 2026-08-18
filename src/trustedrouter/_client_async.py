@@ -33,6 +33,7 @@ from trustedrouter._orchestration import (
 )
 from trustedrouter._requests import (
     _DEFAULT_USER_AGENT,
+    _acredential_free_request,
     _broadcast_destination_body,
     _build_stream_request,
     _install_reserved_header_hook,
@@ -130,18 +131,16 @@ class AsyncTrustedRouter:
         default_headers = {"user-agent": _DEFAULT_USER_AGENT}
         if headers:
             default_headers.update(headers)
-        # x-tr-client is SDK-reserved: drop it here as well as per attempt, so
-        # a value in the client's OWN defaults cannot ride a request that
-        # records nothing -- httpx merges client headers under the per-request
-        # ones, where a dict has no way to delete them.
+        # Preserve constructor headers for SDK requests without mutating an
+        # injected caller-owned client's global defaults.
         _strip_reserved_headers(default_headers)
+        self._default_headers = dict(default_headers)
         if client is not None:
             # Caller is responsible for the client's lifecycle (timeouts,
             # transport, verify, event hooks for cert pinning, etc.).
             # aclose() becomes a no-op.
             self._client = client
             self._owns_client = False
-            _strip_reserved_headers(self._client.headers)
         else:
             self._client = httpx.AsyncClient(
                 timeout=timeout, headers=default_headers, verify=verify
@@ -159,9 +158,7 @@ class AsyncTrustedRouter:
         )
 
     async def aclose(self) -> None:
-        if self._owns_telemetry_reporter and isinstance(
-            self._telemetry_sink, TelemetryReporter
-        ):
+        if self._owns_telemetry_reporter and isinstance(self._telemetry_sink, TelemetryReporter):
             self._telemetry_sink.close()
         if self._owns_client:
             await self._client.aclose()
@@ -211,9 +208,7 @@ class AsyncTrustedRouter:
                     )
                     self._owns_telemetry_reporter = True
         provider = body.get("provider") if body is not None else None
-        provider_pinned = (
-            isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
-        )
+        provider_pinned = isinstance(provider, Mapping) and provider.get("allow_fallbacks") is False
         model = body.get("model") if body is not None else None
         return RequestRecorder(
             self._telemetry_sink,
@@ -238,13 +233,7 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         _base_url: str | None = None,
     ) -> dict[str, Any]:
-        if (
-            idempotency_key is None
-            and _base_url is None
-            and method.upper() not in {"GET", "HEAD", "OPTIONS"}
-        ):
-            idempotency_key = _new_idempotency_key()
-        merged_headers: dict[str, str] = {"user-agent": _DEFAULT_USER_AGENT}
+        merged_headers = dict(self._default_headers)
         if headers:
             merged_headers.update(headers)
         if idempotency_key:
@@ -290,7 +279,20 @@ class AsyncTrustedRouter:
         path: str,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        if kwargs.get("idempotency_key") is None and method.upper() not in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+            "TRACE",
+        }:
+            kwargs["idempotency_key"] = _new_idempotency_key()
         return await self.request(method, path, _base_url=self.control_base_url, **kwargs)
+
+    def _merged_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
+        merged = dict(self._default_headers)
+        if headers:
+            merged.update(headers)
+        return merged
 
     def _build_chat_request(
         self,
@@ -318,7 +320,7 @@ class AsyncTrustedRouter:
             f"{(base_url or self.base_url).rstrip('/')}/chat/completions",
             body=body,
             api_key=api_key if api_key is not None else self.api_key,
-            extra_headers=extra_headers,
+            extra_headers=self._merged_headers(extra_headers),
             idempotency_key=idempotency_key,
             workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
             timeout=timeout,
@@ -596,6 +598,11 @@ class AsyncTrustedRouter:
         trace: Mapping[str, Any] | None = None,
         tags: Mapping[str, str] | None = None,
         provider: ProviderPreferences | Mapping[str, Any] | None = None,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> EmbeddingResponse:
         body: dict[str, Any] = {"model": model, "input": input}
         if encoding_format is not None:
@@ -613,7 +620,16 @@ class AsyncTrustedRouter:
         if provider is not None:
             body["provider"] = dict(provider)
         return EmbeddingResponse.model_validate(
-            await self.request("POST", "/embeddings", json=body)
+            await self.request(
+                "POST",
+                "/embeddings",
+                json=body,
+                headers=extra_headers,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key or _new_idempotency_key(),
+                timeout=timeout,
+            )
         )
 
     async def messages(
@@ -622,6 +638,11 @@ class AsyncTrustedRouter:
         model: str,
         messages: list[Mapping[str, Any]],
         max_tokens: int = 1024,
+        api_key: str | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        idempotency_key: str | None = None,
+        workspace_id: str | None = None,
+        timeout: float | httpx.Timeout | None = None,
         **params: Any,
     ) -> MessagesResponse:
         body: dict[str, Any] = {
@@ -630,7 +651,18 @@ class AsyncTrustedRouter:
             "max_tokens": max_tokens,
             **params,
         }
-        return MessagesResponse.model_validate(await self.request("POST", "/messages", json=body))
+        return MessagesResponse.model_validate(
+            await self.request(
+                "POST",
+                "/messages",
+                json=body,
+                headers=extra_headers,
+                api_key=api_key,
+                workspace_id=workspace_id,
+                idempotency_key=idempotency_key or _new_idempotency_key(),
+                timeout=timeout,
+            )
+        )
 
     async def responses(
         self,
@@ -682,7 +714,7 @@ class AsyncTrustedRouter:
                 f"{base_url}/responses",
                 body=body,
                 api_key=api_key if api_key is not None else self.api_key,
-                extra_headers=extra_headers,
+                extra_headers=self._merged_headers(extra_headers),
                 idempotency_key=idempotency_key,
                 workspace_id=workspace_id if workspace_id is not None else self.workspace_id,
                 timeout=timeout,
@@ -789,6 +821,7 @@ class AsyncTrustedRouter:
         input: str | list[Mapping[str, Any]],
         instructions: str | None = None,
         workspace_id: str | None = None,
+        idempotency_key: str | None = None,
         **params: Any,
     ) -> ResponseInputTokens:
         body = _responses_body(
@@ -804,6 +837,7 @@ class AsyncTrustedRouter:
                 "/responses/input_tokens",
                 json=body,
                 workspace_id=workspace_id,
+                idempotency_key=idempotency_key or _new_idempotency_key(),
             )
         )
 
@@ -936,12 +970,12 @@ class AsyncTrustedRouter:
         )
 
     async def status(self, url: str = DEFAULT_STATUS_URL) -> dict[str, Any]:
-        response = await self._client.get(url)
+        response = await _acredential_free_request(self._client, "GET", url)
         return _json_or_raise(response)
 
     async def attestation(self) -> bytes:
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
-        response = await self._client.get(url)
-        if response.is_error:
+        response = await _acredential_free_request(self._client, "GET", url)
+        if not response.is_success:
             raise TrustedRouterError(response.status_code, response.text[:240])
         return response.content

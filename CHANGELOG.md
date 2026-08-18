@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Typed inference and control-plane mutation helpers now mint one stable
+  `Idempotency-Key` per logical call and reuse it for every attempt. The generic
+  `request()` escape hatch remains deliberately unkeyed; callers must provide
+  `idempotency_key=` to authorize ordinary status retries or replay after an
+  ambiguous write.
+- Standalone sync and async OAuth exchanges now install the same marker-scoped
+  terminal header scrubber used by SDK clients, preventing an injected
+  `httpx` request hook from restoring ambient credentials while leaving the
+  shared client's unmarked traffic unchanged.
+
 ## 0.6.0
 
 - Added client-observed reliability telemetry, enabled by default only when both

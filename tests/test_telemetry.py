@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 import socket
 import ssl
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Generator, Iterator
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -138,7 +138,12 @@ def test_exhausted_retryable_status_is_recorded_before_the_error_is_raised(
 
     sdk = _client(handler, sink, max_retries=1)
     with pytest.raises(InternalError):
-        sdk.request("POST", "/responses", json={"model": "m"})
+        sdk.request(
+            "POST",
+            "/responses",
+            json={"model": "m"},
+            idempotency_key="caller-key",
+        )
 
     assert sink.events[0]["final_outcome"] == "exhausted"
     assert sink.events[0]["final_http_status"] == 503
@@ -224,14 +229,8 @@ def test_reserved_header_stripped_on_every_path(vector: str, path: str) -> None:
     assert seen == expected
 
 
-def test_reserved_header_is_scrubbed_from_client_default_headers() -> None:
-    """The strip also has to hold in the client's own header store.
-
-    httpx merges client default headers UNDER the per-request ones, and a
-    request-level dict has no way to delete what it merged, so a caller value
-    configured as a default (or carried by an injected client) is removed at
-    construction. Unreserved caller headers are untouched.
-    """
+def test_reserved_header_does_not_mutate_an_injected_client() -> None:
+    """SDK requests scrub locally; caller-owned global defaults stay intact."""
     stale = {"x-tr-client": _STALE_CLIENT_HEADER, "x-caller-kept": "yes"}
     sync_sdk = TrustedRouter(api_key="sk-test", regional_affinity=False, headers=stale)
     async_sdk = AsyncTrustedRouter(
@@ -242,9 +241,11 @@ def test_reserved_header_is_scrubbed_from_client_default_headers() -> None:
         regional_affinity=False,
         client=httpx.Client(headers=stale),
     )
-    for client in (sync_sdk._client, async_sdk._client, injected._client):
+    for client in (sync_sdk._client, async_sdk._client):
         assert "x-tr-client" not in client.headers
         assert client.headers["x-caller-kept"] == "yes"
+    assert injected._client.headers["x-tr-client"] == _STALE_CLIENT_HEADER
+    assert injected._client.headers["x-caller-kept"] == "yes"
 
 
 def _forge(request: httpx.Request) -> None:
@@ -258,7 +259,9 @@ async def _aforge(request: httpx.Request) -> None:
 class _ForgingAuth(httpx.Auth):
     """A caller Auth flow that writes the reserved header."""
 
-    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+    def auth_flow(
+        self, request: httpx.Request
+    ) -> Generator[httpx.Request, httpx.Response, None]:
         _forge(request)
         yield request
 
@@ -610,7 +613,9 @@ def test_closing_stream_generator_records_aborted_once() -> None:
         )
 
     sdk = _client(handler, sink)
-    stream = sdk.chat_completions_stream(model="m", messages=[])
+    stream = cast(
+        Generator[str, None, None], sdk.chat_completions_stream(model="m", messages=[])
+    )
     assert next(stream) == "one"
     stream.close()
     assert len(sink.events) == 1
@@ -690,7 +695,10 @@ async def test_async_buffered_and_stream_drivers_record() -> None:
             return httpx.Response(
                 200,
                 headers={"content-type": "text/event-stream"},
-                content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+                content=(
+                    b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                    b"data: [DONE]\n\n"
+                ),
             )
         return httpx.Response(200, json={"ok": True})
 

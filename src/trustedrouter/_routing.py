@@ -24,6 +24,7 @@ from trustedrouter._constants import (
     DEFAULT_API_BASE_URL,
     REGION_BASE_URLS,
 )
+from trustedrouter._requests import _acredential_free_request, _credential_free_request
 
 
 def _inference_base_urls(primary_base_url: str) -> list[str]:
@@ -86,7 +87,9 @@ def _select_regions_sync(
     def measure(base_url: str) -> tuple[float, str] | None:
         started = time.perf_counter()
         try:
-            response = client.get(
+            response = _credential_free_request(
+                client,
+                "GET",
                 f"{base_url.rsplit('/v1', 1)[0]}/health",
                 timeout=timeout_seconds,
             )
@@ -123,7 +126,9 @@ async def _select_regions_async(
     async def measure(base_url: str) -> tuple[float, str] | None:
         started = time.perf_counter()
         try:
-            response = await client.get(
+            response = await _acredential_free_request(
+                client,
+                "GET",
                 f"{base_url.rsplit('/v1', 1)[0]}/health",
                 timeout=timeout_seconds,
             )

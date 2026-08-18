@@ -1,0 +1,19 @@
+name: SDK conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    # Use the candidate harness revision while its matching SDK contract lands.
+    # A follow-up switches this to @main after the harness PR merges.
+    uses: Lore-Hex/trusted-router-sdk-conformance/.github/workflows/sdk-pr.yml@codex/deep-conformance-1-7
+    with:
+      sdk: python
+      allowed_skips: none
