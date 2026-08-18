@@ -53,6 +53,14 @@ from trustedrouter._retry import _retry_after_seconds
 
 _MAX_DURATION_MS = 3_600_000
 _HEADER_VALUE_RE = re.compile(r"^[a-z0-9_]{1,24}$")
+# The x-tr-client `po` key vocabulary is closed by the contract (v1, section
+# 3.2) and is NARROWER than TELEMETRY_OUTCOMES: it has "none" and lacks
+# "ok"/"aborted". A previous outcome outside it maps to none (see
+# header_value) because the enclave drops the whole header on an
+# out-of-vocabulary value.
+_HEADER_PO_VOCABULARY = frozenset(
+    {"none", "http_error", "transport_error", "timeout", "stream_broken"}
+)
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:/~@-]{1,128}$")
 _REQUEST_ID_RE = re.compile(r"^rlog_[0-9a-f]{32}$")
 _SEMVER_RE = re.compile(
@@ -1309,6 +1317,11 @@ class RequestRecorder:
     def header_value(self) -> str | None:
         if self._current_host == "custom" or self._current_index is None:
             return None
+        # The contract (v1, section 3.2) caps `a` at 0..99 and the enclave drops
+        # the whole header on an out-of-range value, so suppress it entirely
+        # past the bound -- matching the sibling SDKs.
+        if self._current_index > 99:
+            return None
         values = ["v=1", f"a={self._current_index}"]
         if self._current_index:
             previous = self.attempts[-1]
@@ -1319,10 +1332,19 @@ class RequestRecorder:
                 first_started,
                 self._attempt_started,
             )
+            previous_outcome = previous.outcome
+            previous_class = previous.error_class or "none"
+            if previous_outcome not in _HEADER_PO_VOCABULARY:
+                # A forced x-should-retry retry of a sub-400 response leaves
+                # the previous outcome "ok" (and an interrupted attempt
+                # "aborted") -- both outside the po vocabulary, so map them to
+                # none/none rather than shipping a header the enclave drops.
+                previous_outcome = "none"
+                previous_class = "none"
             values.extend(
                 (
-                    f"po={previous.outcome}",
-                    f"pc={previous.error_class or 'none'}",
+                    f"po={previous_outcome}",
+                    f"pc={previous_class}",
                     f"ph={previous.host}",
                     f"pm={previous.elapsed_ms}",
                     f"sm={since_first_ms}",

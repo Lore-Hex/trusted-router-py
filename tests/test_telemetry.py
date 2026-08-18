@@ -96,6 +96,37 @@ def test_buffered_retry_header_and_record_capture_client_observations(
     assert [counter[0][0] for counter in sink.counters[1:]] == ["attempt", "attempt"]
 
 
+def test_forced_retry_of_a_success_reports_po_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sub-400 response retried on x-should-retry: true leaves the previous
+    outcome "ok" -- outside the po vocabulary of contract v1 section 3.2 --
+    so the retry attempt's header must map it to po=none;pc=none rather than
+    shipping a value the enclave drops the whole header for."""
+    monkeypatch.setattr("trustedrouter.client._retry_sleep", lambda *_args, **_kwargs: 0.0)
+    sink = RecordingSink()
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        if len(seen) == 1:
+            return httpx.Response(
+                200,
+                headers={"x-should-retry": "true"},
+                json={"retry": True},
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    sdk = _client(handler, sink, max_retries=1)
+    assert sdk.request("POST", "/responses", json={"model": "m"}) == {"ok": True}
+
+    assert seen[0] == "v=1;a=0;s=0"
+    retry_header = seen[1]
+    assert retry_header is not None
+    assert ";a=1;" in retry_header
+    assert ";po=none;pc=none;" in retry_header
+
+
 def test_exhausted_retryable_status_is_recorded_before_the_error_is_raised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -143,6 +174,208 @@ def test_custom_base_and_opt_out_send_no_header_or_sink_call(
     assert headers == [None]
     assert sink.events == []
     assert sink.counters == []
+
+
+_STALE_CLIENT_HEADER = "v=1;a=7;po=http_error;pc=none;ph=apex;pm=1;sm=1;s=0;fo=0"
+
+
+@pytest.mark.parametrize("vector", ["per_call_headers", "injected_client_headers"])
+@pytest.mark.parametrize(
+    "path",
+    ["opt_out", "custom_base", "control_plane", "recording"],
+)
+def test_reserved_header_stripped_on_every_path(vector: str, path: str) -> None:
+    """x-tr-client is SDK-reserved: only the recorder may set it.
+
+    A stale or forged caller value -- from client default headers, per-call
+    headers, or an injected client's own headers -- never reaches the gateway
+    on any path, and an active recorder's value replaces it.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True, "data": []})
+
+    stale = {"x-tr-client": _STALE_CLIENT_HEADER}
+    sdk = TrustedRouter(
+        api_key="sk-test",
+        base_url="https://private.example/v1" if path == "custom_base" else None,
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            headers=stale if vector == "injected_client_headers" else None,
+        ),
+        regional_affinity=False,
+        telemetry={"opt_out": False, "recording": True}.get(path),
+        _telemetry_sink=RecordingSink(),
+    )
+    per_call = stale if vector == "per_call_headers" else None
+    if path == "control_plane":
+        assert sdk._control_request("GET", "/models", headers=per_call) == {
+            "ok": True,
+            "data": [],
+        }
+    else:
+        assert sdk.request(
+            "POST", "/responses", json={"model": "m"}, headers=per_call
+        ) == {"ok": True, "data": []}
+
+    expected = ["v=1;a=0;s=0"] if path == "recording" else [None]
+    assert seen == expected
+
+
+def test_reserved_header_is_scrubbed_from_client_default_headers() -> None:
+    """The strip also has to hold in the client's own header store.
+
+    httpx merges client default headers UNDER the per-request ones, and a
+    request-level dict has no way to delete what it merged, so a caller value
+    configured as a default (or carried by an injected client) is removed at
+    construction. Unreserved caller headers are untouched.
+    """
+    stale = {"x-tr-client": _STALE_CLIENT_HEADER, "x-caller-kept": "yes"}
+    sync_sdk = TrustedRouter(api_key="sk-test", regional_affinity=False, headers=stale)
+    async_sdk = AsyncTrustedRouter(
+        api_key="sk-test", regional_affinity=False, headers=stale
+    )
+    injected = TrustedRouter(
+        api_key="sk-test",
+        regional_affinity=False,
+        client=httpx.Client(headers=stale),
+    )
+    for client in (sync_sdk._client, async_sdk._client, injected._client):
+        assert "x-tr-client" not in client.headers
+        assert client.headers["x-caller-kept"] == "yes"
+
+
+def _forge(request: httpx.Request) -> None:
+    request.headers["x-tr-client"] = "alice@example.com"
+
+
+async def _aforge(request: httpx.Request) -> None:
+    _forge(request)
+
+
+class _ForgingAuth(httpx.Auth):
+    """A caller Auth flow that writes the reserved header."""
+
+    def auth_flow(self, request: httpx.Request) -> Iterator[httpx.Request]:
+        _forge(request)
+        yield request
+
+
+@pytest.mark.parametrize("vector", ["late_default_mutation", "request_hook", "auth_flow"])
+@pytest.mark.parametrize("recording", [False, True])
+def test_reservation_holds_against_writers_downstream_of_the_scrub(
+    vector: str, recording: bool
+) -> None:
+    """The three writers that beat a per-request scrub must still lose.
+
+    httpx merges client defaults under the per-request headers, and runs the
+    caller's ``Auth`` flow and request event hooks INSIDE ``send()`` -- after
+    ``build_request()`` and after anything the driver wrote. So the reservation
+    is re-asserted by a terminal hook installed at construction: with telemetry
+    off the header must be absent, and with an active recorder the recorder's
+    value must survive rather than the forged one.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True, "data": []})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        event_hooks={"request": [_forge]} if vector == "request_hook" else None,
+        auth=_ForgingAuth() if vector == "auth_flow" else None,
+    )
+    sdk = TrustedRouter(
+        api_key="sk-test",
+        client=client,
+        regional_affinity=False,
+        telemetry=recording,
+        _telemetry_sink=RecordingSink(),
+    )
+    if vector == "late_default_mutation":
+        # Set AFTER construction, so the construction-time scrub cannot help.
+        client.headers["x-tr-client"] = "alice@example.com"
+
+    sdk.request("POST", "/responses", json={"model": "m"})
+
+    assert seen == (["v=1;a=0;s=0"] if recording else [None])
+
+
+def test_reservation_hook_ignores_requests_the_sdk_did_not_build() -> None:
+    """The terminal hook is scoped by an extensions marker, not global.
+
+    An injected client is usually shared with the caller's own traffic; the
+    reservation must not reach into requests the SDK never issued.
+    """
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    TrustedRouter(api_key="sk-test", client=client, regional_affinity=False, telemetry=False)
+
+    client.get("https://elsewhere.example/", headers={"x-tr-client": "callers-own-business"})
+
+    assert seen == ["callers-own-business"]
+
+
+def test_reservation_holds_on_the_stream_driver_and_async_facade() -> None:
+    """The two drivers the PR deliberately did not restructure, plus async.
+
+    Both get the reservation from the same terminal hook, so a caller request
+    hook cannot forge the header on a stream open or on the async facade.
+    """
+    seen: list[str | None] = []
+
+    def stream_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    def json_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("x-tr-client"))
+        return httpx.Response(200, json={"ok": True, "data": []})
+
+    sync_sdk = TrustedRouter(
+        api_key="sk-test",
+        client=httpx.Client(
+            transport=httpx.MockTransport(stream_handler), event_hooks={"request": [_forge]}
+        ),
+        regional_affinity=False,
+        telemetry=False,
+    )
+    list(
+        sync_sdk.chat_completions_chunk_stream(
+            model="m", messages=[{"role": "user", "content": "x"}]
+        )
+    )
+    assert seen == [None]
+
+    seen.clear()
+
+    async def drive() -> None:
+        async_sdk = AsyncTrustedRouter(
+            api_key="sk-test",
+            client=httpx.AsyncClient(
+                transport=httpx.MockTransport(json_handler), event_hooks={"request": [_aforge]}
+            ),
+            regional_affinity=False,
+            telemetry=False,
+        )
+        await async_sdk.request("GET", "/models")
+
+    import asyncio
+
+    asyncio.run(drive())
+    assert seen == [None]
 
 
 def test_control_plane_call_is_never_traced() -> None:
@@ -308,6 +541,29 @@ def test_retry_header_since_first_works_when_monotonic_clock_starts_at_zero(
     recorder.on_moved()
     recorder.begin_attempt(ALIAS_API_BASE_URLS[0])
     assert ";sm=200;" in (recorder.header_value() or "")
+
+
+def test_retry_header_is_suppressed_above_the_attempt_grammar_bound() -> None:
+    recorder = RequestRecorder(
+        RecordingSink(),
+        endpoint="responses",
+        method="POST",
+        streaming=False,
+        provider_pinned=False,
+        model="m",
+        configured_timeout=120.0,
+    )
+    for _ in range(99):
+        recorder.begin_attempt(DEFAULT_API_BASE_URL)
+        recorder.on_response(503, {})
+    recorder.begin_attempt(DEFAULT_API_BASE_URL)
+    assert ";a=99;" in (recorder.header_value() or "")
+    recorder.on_response(503, {})
+    for _ in range(2):
+        recorder.begin_attempt(DEFAULT_API_BASE_URL)
+        assert recorder.header_value() is None
+        recorder.on_response(503, {})
+    recorder.finish(exhausted=True)
 
 
 class _BrokenBody(httpx.SyncByteStream):
