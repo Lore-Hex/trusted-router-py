@@ -411,19 +411,94 @@ httpx event hook, while delegating chat streaming to the SDK.
 
 ## CLI
 
-`pip install` exposes a `trustedrouter` console script for sniff tests:
+The package includes the official `trustedrouter` CLI for developers, coding
+agents, CI jobs, and gateway diagnostics. Install it into an isolated tool
+environment, or use the console script from your existing SDK environment:
+
+```bash
+pipx install trusted-router-py
+# or: uv tool install trusted-router-py
+# or: pip install trusted-router-py
+```
+
+Authentication comes from `TRUSTEDROUTER_API_KEY`, with `TR_API_KEY` retained
+as a backwards-compatible fallback. Agents can also set
+`TRUSTEDROUTER_BASE_URL` (or legacy `TR_BASE_URL`),
+`TRUSTEDROUTER_CONTROL_BASE_URL`, and `TRUSTEDROUTER_WORKSPACE_ID` without
+putting configuration on the process command line:
 
 ```bash
 export TRUSTEDROUTER_API_KEY=sk-tr-v1-...
 
 trustedrouter chat "hello"                 # one-shot completion
+echo "summarize this" | trustedrouter chat # prompt from stdin
+trustedrouter chat - < prompt.txt           # explicit stdin marker
 trustedrouter chat --stream "long answer"  # token-by-token
 trustedrouter regions                      # list deployed regions
 trustedrouter providers                    # list provider catalog
 trustedrouter models                       # list model catalog
 trustedrouter trust                        # show trust release
-trustedrouter attest                       # raw JWT bytes (pipe to `jq`-able tools)
+trustedrouter attest                       # raw attestation JWT bytes
+trustedrouter attest --verify              # verify signature + workload identity
+trustedrouter attest --session             # prove live same-socket TLS binding
+trustedrouter --version
 ```
+
+The raw `attest` command is available in the base install. Install
+`trusted-router-py[attestation]` to use `attest --verify` or
+`attest --session`. `--verify` validates the signed document against the
+published workload identity. Only `--session` proves the live TLS exporter and
+performs a same-socket follow-up challenge. `--connect-ip` is accepted only
+with `--session` and must not be empty.
+
+### Agent and JSON contract
+
+Pass global `--json` before or after a subcommand. Non-streaming successes emit
+one compact JSON object on stdout:
+
+```json
+{"command":"chat","data":{"id":"...","choices":[...]},"ok":true}
+```
+
+Errors emit one compact object on stderr and never mix in usage text:
+
+```json
+{"error":{"message":"invalid","status_code":401,"type":"authentication_error"},"ok":false}
+```
+
+Typed SDK errors use their cross-runtime snake-case class names, such as
+`rate_limit_error` and `internal_error`; non-SDK failures use `runtime_error`.
+Attestation successes use `attest`, `attest.verify`, or `attest.session` as the
+`command` value so agents can distinguish the three result schemas.
+
+`chat --stream --json` emits JSON Lines: one `chat.delta` record per nonempty
+text delta, followed by one terminal `chat.done` record. Plain mode keeps the
+original human-readable output. JSON records are UTF-8, key-sorted, and contain
+no ANSI formatting, so agents can parse them without checking whether stdout is
+a terminal.
+
+```bash
+trustedrouter --json models | jq '.data.data[].id'
+printf 'hello' | trustedrouter chat --json
+trustedrouter chat --stream --json "count to three"
+```
+
+Stable process exit codes:
+
+| code | meaning |
+|---:|---|
+| `0` | command completed successfully |
+| `1` | API, network, trust, or other runtime failure |
+| `2` | invalid CLI usage or invalid/empty input |
+| `3` | missing/rejected/expired authentication, or permission denied |
+
+For stdin prompts, use `-` by itself or omit the positional prompt when stdin
+is piped. Combining `-` with positional prompt text is rejected as ambiguous,
+and stdin leading/trailing whitespace is preserved. Input must be valid UTF-8
+and is capped at 8 MiB before any network request is made. `--retries` must be
+at least 0 and `--max-tokens` must be at least 1; invalid values exit 2 before
+constructing a client. An explicit `--model` must contain a non-whitespace
+model id.
 
 ## Other endpoints
 

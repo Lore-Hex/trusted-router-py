@@ -1,7 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
+- Promoted the bundled `trustedrouter` command from a gateway sniff-test helper
+  to the official agent-grade CLI. It now supports prompt stdin, `--version`,
+  deterministic `--json` success/error envelopes, JSON Lines streaming, and
+  documented stable exit codes while preserving the existing plain commands.
+  Stdin is bounded at 8 MiB, numeric options fail before networking, 401/403
+  share the authentication/permission exit contract, and base/control/workspace
+  configuration can come from documented environment variables. Attestation
+  JSON distinguishes raw, identity-verified, and TLS-session-verified results;
+  only session verification accepts `--connect-ip` or claims same-socket
+  binding. SDK exception types are consistent with the JavaScript CLI.
 - Typed inference and control-plane mutation helpers now mint one stable
   `Idempotency-Key` per logical call and reuse it for every attempt. The generic
   `request()` escape hatch remains deliberately unkeyed; callers must provide
