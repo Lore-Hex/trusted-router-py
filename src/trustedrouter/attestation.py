@@ -32,7 +32,7 @@ import json
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -253,9 +253,12 @@ def _check_claims(
     nonce_hex: str | None,
     tls_cert_der: bytes | None,
     tls_exporter: bytes | None,
+    binding_mode: Literal["live-channel", "receipt-key"] = "live-channel",
 ) -> GatewayAttestation:
     """Validate every claim the policy requires. Raises on any mismatch.
     Returns a GatewayAttestation if everything checks out."""
+    if binding_mode not in {"live-channel", "receipt-key"}:
+        raise AttestationVerificationError(f"unsupported attestation binding mode {binding_mode!r}")
     now = int(time.time())
     exp = claims.get("exp")
     if not isinstance(exp, int) or isinstance(exp, bool):
@@ -334,18 +337,32 @@ def _check_claims(
     # the `nonces` claim (a list per CSP convention). If we sent one
     # but the JWT doesn't carry it, this is either a replay or a
     # misbehaving gateway — fail closed.
-    nonces = claims.get("eat_nonce") or claims.get("nonces") or []
+    eat_nonces = claims.get("eat_nonce")
+    nonces = eat_nonces or claims.get("nonces") or []
     nonce_match: str | None = None
     if isinstance(nonces, str):
         nonces = [nonces]
     if nonce_hex is not None:
-        if nonce_hex not in nonces:
+        if binding_mode == "receipt-key":
+            if isinstance(eat_nonces, str):
+                receipt_nonces = [eat_nonces]
+            elif isinstance(eat_nonces, list):
+                receipt_nonces = eat_nonces
+            else:
+                receipt_nonces = []
+            committed_values = {
+                nonce.lower() for nonce in receipt_nonces if isinstance(nonce, str)
+            }
+            nonce_present = nonce_hex.lower() in committed_values
+        else:
+            nonce_present = nonce_hex in nonces
+        if not nonce_present:
             raise AttestationVerificationError(
                 f"nonce {nonce_hex!r} not present in JWT nonces {nonces!r}"
             )
         nonce_match = nonce_hex
 
-    if tls_exporter is not None:
+    if binding_mode == "live-channel" and tls_exporter is not None:
         if nonce_hex is None:
             raise AttestationVerificationError("fresh nonce required with exporter binding")
         exporter_hex = tls_exporter.hex()
@@ -359,30 +376,39 @@ def _check_claims(
         ):
             raise AttestationVerificationError("TLS exporter binding not present in JWT nonces")
 
-    # Cert binding: the gateway includes the SHA-256 hex of its TLS
-    # leaf cert as a nonce-style claim too (`tls_cert_sha256` or
-    # `dbgstat`/`hwmodel` fields differ by CSP version). We accept
-    # several known field names.
-    cert_sha = (
-        claims.get("tls_cert_sha256")
-        or claims.get("workload_tls_cert_sha256")
-        or _find_cert_in_nonces(nonces, tls_cert_der)
-    )
-    if not isinstance(cert_sha, str) or len(cert_sha) != 64:
-        raise AttestationVerificationError(
-            "JWT does not commit to a TLS cert SHA-256 — cannot bind connection"
+    if binding_mode == "live-channel":
+        # Cert binding: the gateway includes the SHA-256 hex of its TLS
+        # leaf cert as a nonce-style claim too (`tls_cert_sha256` or
+        # `dbgstat`/`hwmodel` fields differ by CSP version). We accept
+        # several known field names.
+        cert_sha = (
+            claims.get("tls_cert_sha256")
+            or claims.get("workload_tls_cert_sha256")
+            or _find_cert_in_nonces(nonces, tls_cert_der)
         )
-    cert_sha = cert_sha.lower()
-
-    if tls_cert_der is not None:
-        actual = hashlib.sha256(tls_cert_der).hexdigest()
-        if not _safe_eq(actual, cert_sha):
+        if not isinstance(cert_sha, str) or len(cert_sha) != 64:
             raise AttestationVerificationError(
-                f"TLS cert mismatch: connection={actual!r}, JWT={cert_sha!r}"
+                "JWT does not commit to a TLS cert SHA-256 — cannot bind connection"
             )
+        cert_sha = cert_sha.lower()
 
-    if policy.expected_cert_sha256 and not _safe_eq(cert_sha, policy.expected_cert_sha256.lower()):
-        raise AttestationVerificationError("JWT-committed cert SHA-256 doesn't match policy pin")
+        if tls_cert_der is not None:
+            actual = hashlib.sha256(tls_cert_der).hexdigest()
+            if not _safe_eq(actual, cert_sha):
+                raise AttestationVerificationError(
+                    f"TLS cert mismatch: connection={actual!r}, JWT={cert_sha!r}"
+                )
+
+        if policy.expected_cert_sha256 and not _safe_eq(
+            cert_sha, policy.expected_cert_sha256.lower()
+        ):
+            raise AttestationVerificationError(
+                "JWT-committed cert SHA-256 doesn't match policy pin"
+            )
+    else:
+        # A receipt attestation certifies a durable signing key. It is not
+        # evidence about the verifier's current TLS connection.
+        cert_sha = ""
 
     return GatewayAttestation(
         cert_sha256=cert_sha,
@@ -429,6 +455,20 @@ def _fetch_jwks(url: str = GCP_JWKS_URI, *, timeout: float = 10.0) -> dict[str, 
 # ---- public entrypoint --------------------------------------------------
 
 
+def _verified_jwt_claims(
+    document: bytes,
+    *,
+    jwks: Mapping[str, Any] | None,
+    jwks_url: str,
+) -> Mapping[str, Any]:
+    """Verify the JWS signature and return its decoded claims."""
+    header, payload, signing_input, signature = _jwt_split(document)
+    if jwks is None:
+        jwks = _fetch_jwks(jwks_url)
+    _verify_rs256(jwks, header, signing_input, signature)
+    return payload
+
+
 def verify_gateway_attestation(
     document: bytes,
     *,
@@ -460,16 +500,40 @@ def verify_gateway_attestation(
     Returns a GatewayAttestation on success. Raises
     AttestationVerificationError on any failure — never returns False
     or None for a failed verification."""
-    header, payload, signing_input, signature = _jwt_split(document)
-    if jwks is None:
-        jwks = _fetch_jwks(jwks_url)
-    _verify_rs256(jwks, header, signing_input, signature)
+    payload = _verified_jwt_claims(document, jwks=jwks, jwks_url=jwks_url)
     return _check_claims(
         payload,
         policy=policy,
         nonce_hex=nonce_hex,
         tls_cert_der=tls_cert_der,
         tls_exporter=tls_exporter,
+        binding_mode="live-channel",
+    )
+
+
+def verify_receipt_key_attestation(
+    document: bytes,
+    *,
+    policy: AttestationPolicy,
+    key_commitment_hex: str,
+    jwks: Mapping[str, Any] | None = None,
+    jwks_url: str = GCP_JWKS_URI,
+) -> None:
+    """Verify a GCP key-binding attestation for a receipt signing key.
+
+    This performs the same signature, issuer, audience, validity, debug,
+    hardware, and image-policy checks as :func:`verify_gateway_attestation`,
+    but deliberately omits live TLS certificate/exporter binding. The receipt
+    key commitment must occur somewhere in the attestation's nonce set.
+    """
+    payload = _verified_jwt_claims(document, jwks=jwks, jwks_url=jwks_url)
+    _check_claims(
+        payload,
+        policy=policy,
+        nonce_hex=key_commitment_hex,
+        tls_cert_der=None,
+        tls_exporter=None,
+        binding_mode="receipt-key",
     )
 
 
@@ -483,4 +547,5 @@ __all__ = [
     "GatewayAttestation",
     "policy_from_trust_release",
     "verify_gateway_attestation",
+    "verify_receipt_key_attestation",
 ]
