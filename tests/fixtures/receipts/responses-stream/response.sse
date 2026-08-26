@@ -1,0 +1,13 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_fixture3","status":"in_progress"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"parity"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_fixture3","status":"completed"}}
+
+data: {"choices":[],"created":1756224000,"id":"resp_fixture3","inference_receipt":{"protected":"eyJhbGciOiJFZERTQSIsInR5cCI6ImluZmVyZW5jZS1yZWNlaXB0K2p3cyIsImtpZCI6Im5lSkdqR2NVMi1BTEFaOGhWVktpWnNDYl9rQ0lBZkY5OXB5cnhSLVc5eTAiLCJqd2siOnsia3R5IjoiT0tQIiwiY3J2IjoiRWQyNTUxOSIsIngiOiJvYWJrMklYT2poSUZBckFaQ0J2VEd5U0NDNndGcDhqelpJWXJ0VEdXUEkwIn0sImF0dCI6InBhcml0eS1maXh0dXJlLWF0dGVzdGF0aW9uLWRvY3VtZW50LW5vdC1yZWFsLWV2aWRlbmNlIiwiYXR0X2tpbmQiOiJnY3AtY3Mtand0In0","payload":"eyJydiI6MSwiaXNzIjoiaHR0cHM6Ly9hcGkudHJ1c3RlZHJvdXRlci5jb20iLCJpYXQiOjE3NTYyMjQwMDAsImp0aSI6InJlc3BfZml4dHVyZTMiLCJub25jZSI6ImZpeHR1cmVfbm9uY2VfMyIsInJvdXRlIjoicmVzcG9uc2VzIiwicmVxIjp7ImFsZyI6InNoYTI1NiIsImhhc2giOiJNUXBKODhUdklELXNhOXMzeGUtZ2UtZ2JBTzBwTnBCRy1fOHowYmhFQUpJIiwib2YiOiJib2R5In0sInJlc3AiOnsiYWxnIjoic2hhMjU2IiwiaGFzaCI6ImJUUHk1dUpnM3RmMlpONE9HeWU2d1RKZW56d0c0NTVyek5KdkZBMl9VR0kiLCJvZiI6InNzZS1ldmVudHMtdjEiLCJldmVudHMiOjN9LCJtb2RlbCI6eyJyZXF1ZXN0ZWQiOiJ0cnVzdGVkcm91dGVyL2F1dG8iLCJzZWxlY3RlZCI6Im9wZW5haS9ncHQtNG8tbWluaSIsInByb3ZpZGVyIjoib3BlbmFpIiwiZW5kcG9pbnQiOiJvcGVuYWkvZ3B0LTRvLW1pbmlAb3BlbmFpL3ByZXBhaWQifSwidXBzdHJlYW0iOnsidGllciI6InRscy13ZWJwa2kifX0","signature":"5h07uzltYHgvsfL-vMiZfl-dzQRia8YjLuL-k2uwM6sckp5qynuIt_x59O-w7vX9TqSlv00pmg1LLrCbeFKRCA"},"model":"openai/gpt-4o-mini","object":"chat.completion.chunk"}
+
+data: [DONE]
+

@@ -1,0 +1,1 @@
+{"id":"chatcmpl-fixture1","object":"chat.completion","model":"openai/gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"parity fixture completion"},"finish_reason":"stop"}]}
