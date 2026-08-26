@@ -19,6 +19,7 @@ classifiers = [
 
 [project.optional-dependencies]
 attestation = ["pyopenssl>=22.0", "cryptography"]
+receipts = ["cryptography"]
 
 [project.urls]
 Homepage = "https://trustedrouter.com"
