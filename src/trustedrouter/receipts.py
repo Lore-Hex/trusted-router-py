@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 from trustedrouter.attestation import (
     policy_from_trust_release,
-    verify_gateway_attestation,
+    verify_receipt_key_attestation,
 )
 
 _RECEIPT_TYPE = "inference-receipt+jws"
@@ -494,11 +494,11 @@ def _stream_digest(
     return digest.digest(), events
 
 
-def _verify_gcp_attestation(attestation: str, commitment: bytes) -> None:
-    """Reuse the package verifier, treating the key commitment as a required nonce member."""
+def _verify_gcp_attestation(attestation: bytes, commitment: bytes) -> None:
+    """Verify a GCP receipt-key attestation and its commitment membership."""
     policy = policy_from_trust_release()
-    verify_gateway_attestation(
-        attestation.encode("ascii"), policy=policy, nonce_hex=commitment.hex()
+    verify_receipt_key_attestation(
+        attestation, policy=policy, key_commitment_hex=commitment.hex()
     )
 
 
@@ -507,37 +507,63 @@ def _attestation_status(
     header: Mapping[str, Any],
     public_key: bytes,
     *,
+    attestation: bytes | None,
+    att_sha256: str | None,
     require_attestation: bool,
 ) -> Literal["verified", "unverified_by_this_sdk"]:
     if not envelope.flattened:
-        if require_attestation:
+        if attestation is None:
+            if not require_attestation:
+                return "unverified_by_this_sdk"
             raise MissingAttestationError(
                 "attestation check failed: compact receipts omit attestation evidence; "
                 "obtain the pinned document or explicitly pass require_attestation=False"
             )
-        return "unverified_by_this_sdk"
-
-    kind = header.get("att_kind")
-    attestation = header.get("att")
-    if kind in {"aws-nitro-cose", "azure-maa-jwt"}:
-        raise UnsupportedAttestationError(
-            f"attestation kind check failed: {kind!r} is not supported by this SDK"
-        )
-    if kind != "gcp-cs-jwt":
-        if kind is None:
+        if att_sha256 is None:  # guarded by the claims check in verify_receipt
             raise MissingAttestationError(
-                "attestation check failed: flattened receipt has no att_kind"
+                "attestation check failed: compact receipt has no att_sha256 claim"
             )
-        raise UnsupportedAttestationError(
-            f"attestation kind check failed: unsupported att_kind {kind!r}"
-        )
-    if not isinstance(attestation, str) or not attestation:
-        raise MissingAttestationError(
-            "attestation check failed: flattened receipt has no embedded att"
-        )
+        expected_digest = _b64url_decode(att_sha256, check="att_sha256 claim")
+        actual_digest = hashlib.sha256(attestation).digest()
+        if not hmac.compare_digest(actual_digest, expected_digest):
+            raise ReceiptAttestationError(
+                "att_sha256 check failed: supplied attestation does not match the compact receipt"
+            )
+        document = attestation
+    else:
+        kind = header.get("att_kind")
+        embedded = header.get("att")
+        if kind in {"aws-nitro-cose", "azure-maa-jwt"}:
+            raise UnsupportedAttestationError(
+                f"attestation kind check failed: {kind!r} is not supported by this SDK"
+            )
+        if kind != "gcp-cs-jwt":
+            if kind is None:
+                raise MissingAttestationError(
+                    "attestation check failed: flattened receipt has no att_kind"
+                )
+            raise UnsupportedAttestationError(
+                f"attestation kind check failed: unsupported att_kind {kind!r}"
+            )
+        if not isinstance(embedded, str) or not embedded:
+            raise MissingAttestationError(
+                "attestation check failed: flattened receipt has no embedded att"
+            )
+        try:
+            document = embedded.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ReceiptAttestationError(
+                "attestation check failed: flattened receipt att must be ASCII"
+            ) from exc
+        if attestation is not None and not hmac.compare_digest(attestation, document):
+            raise ReceiptAttestationError(
+                "attestation check failed: supplied attestation does not match the "
+                "flattened receipt's embedded attestation"
+            )
+
     commitment = hashlib.sha256(_KEY_COMMITMENT_DOMAIN + public_key).digest()
     try:
-        _verify_gcp_attestation(attestation, commitment)
+        _verify_gcp_attestation(document, commitment)
     except ReceiptVerificationError:
         raise
     except Exception as exc:
@@ -554,14 +580,17 @@ def verify_receipt(
     expected_nonce: str | None = None,
     max_age_seconds: int | float | None = None,
     now: int | float | None = None,
+    attestation: bytes | None = None,
     require_attestation: bool = True,
 ) -> ReceiptClaims:
     """Verify a compact or flattened inference receipt and return typed claims.
 
-    Compact receipts cannot carry their attestation document. Passing
-    ``require_attestation=False`` is an explicit signature-and-hashes-only
-    escape hatch for that delivery form; flattened receipts always verify
-    their embedded evidence and fail closed for unsupported kinds.
+    Compact receipts cannot carry their attestation document. Pass its exact
+    bytes as ``attestation=`` to check the pinned digest and verify the key
+    binding. Passing ``require_attestation=False`` is an explicit
+    signature-and-hashes-only escape hatch when those bytes are unavailable.
+    Flattened receipts always verify their embedded evidence; if
+    ``attestation=`` is also supplied, it must equal the embedded document.
     """
     envelope = _parse_envelope(receipt)
     header, public_key = _parse_header(envelope)
@@ -569,6 +598,8 @@ def verify_receipt(
     payload = _load_json(payload_bytes, check="receipt claims")
     if not isinstance(payload, Mapping):
         raise ReceiptClaimsError("rv claim check failed: receipt claims must be a JSON object")
+    if attestation is not None and not isinstance(attestation, bytes):
+        raise ReceiptAttestationError("attestation check failed: attestation must be bytes")
 
     rv = payload.get("rv")
     if not isinstance(rv, int) or isinstance(rv, bool) or rv != 1:
@@ -637,8 +668,28 @@ def verify_receipt(
     else:
         raise ReceiptUpstreamError(f"upstream.tier check failed: unsupported tier {tier!r}")
 
+    att_sha256 = _optional_str(payload, "att_sha256")
+    if att_sha256 is not None:
+        try:
+            att_digest = _b64url_decode(att_sha256, check="att_sha256 claim")
+        except ReceiptStructureError as exc:
+            raise ReceiptClaimsError(str(exc)) from exc
+        if len(att_digest) != 32:
+            raise ReceiptClaimsError(
+                "att_sha256 claim check failed: SHA-256 digest must be 32 bytes"
+            )
+    if not envelope.flattened and att_sha256 is None:
+        raise ReceiptClaimsError(
+            "att_sha256 claim check failed: compact receipts must pin an attestation document"
+        )
+
     attestation_status = _attestation_status(
-        envelope, header, public_key, require_attestation=require_attestation
+        envelope,
+        header,
+        public_key,
+        attestation=attestation,
+        att_sha256=att_sha256,
+        require_attestation=require_attestation,
     )
 
     req = _digest_claim(
@@ -712,21 +763,6 @@ def verify_receipt(
         verification_expires_at=verification_expires_at,
         cert_sha256=cert_sha256,
     )
-    att_sha256 = _optional_str(payload, "att_sha256")
-    if att_sha256 is not None:
-        try:
-            att_digest = _b64url_decode(att_sha256, check="att_sha256 claim")
-        except ReceiptStructureError as exc:
-            raise ReceiptClaimsError(str(exc)) from exc
-        if len(att_digest) != 32:
-            raise ReceiptClaimsError(
-                "att_sha256 claim check failed: SHA-256 digest must be 32 bytes"
-            )
-    if not envelope.flattened and att_sha256 is None:
-        raise ReceiptClaimsError(
-            "att_sha256 claim check failed: compact receipts must pin an attestation document"
-        )
-
     return ReceiptClaims(
         rv=rv,
         iss=iss,

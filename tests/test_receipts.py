@@ -10,9 +10,17 @@ from typing import Any
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import trustedrouter.attestation as attestation_module
 import trustedrouter.receipts as receipts_module
+from trustedrouter.attestation import (
+    GCP_ISSUER,
+    AttestationPolicy,
+    AttestationVerificationError,
+    verify_gateway_attestation,
+)
 from trustedrouter.receipts import (
     MissingAttestationError,
+    ReceiptAttestationError,
     ReceiptCapture,
     ReceiptHashError,
     ReceiptHeaderError,
@@ -112,6 +120,36 @@ def _receipt_event(receipt: Mapping[str, str]) -> bytes:
         separators=(",", ":"),
     ).encode()
     return b"data: " + payload + b"\n\n"
+
+
+def _gcp_key_attestation(nonces: list[str]) -> bytes:
+    header = _b64(json.dumps({"alg": "RS256", "kid": "test-kid"}).encode())
+    claims = {
+        "iss": GCP_ISSUER,
+        "aud": ["quill-cloud"],
+        "exp": 4_000_000_000,
+        "dbgstat": "disabled-since-boot",
+        "swname": "CONFIDENTIAL_SPACE",
+        "secboot": True,
+        "hwmodel": "GCP_AMD_SEV",
+        "submods": {
+            "container": {
+                "image_digest": "sha256:abc123",
+                "image_reference": "registry.example/image:tag",
+            }
+        },
+        "eat_nonce": nonces,
+    }
+    payload = _b64(json.dumps(claims).encode())
+    return f"{header}.{payload}.{_b64(b'fake-signature')}".encode()
+
+
+def _mock_gcp_signature_and_policy(monkeypatch: pytest.MonkeyPatch) -> AttestationPolicy:
+    policy = AttestationPolicy(expected_image_digest="sha256:abc123")
+    monkeypatch.setattr(attestation_module, "_verify_rs256", lambda *_args: None)
+    monkeypatch.setattr(attestation_module, "_fetch_jwks", lambda *_args, **_kwargs: {"keys": []})
+    monkeypatch.setattr(receipts_module, "policy_from_trust_release", lambda: policy)
+    return policy
 
 
 def _stream_receipt(
@@ -299,7 +337,7 @@ def test_gcp_attestation_reuses_verifier_and_checks_commitment_membership(
     def fake_verify(document: bytes, **kwargs: Any) -> None:
         seen.update(document=document, **kwargs)
 
-    monkeypatch.setattr(receipts_module, "verify_gateway_attestation", fake_verify)
+    monkeypatch.setattr(receipts_module, "verify_receipt_key_attestation", fake_verify)
     claims = _claims()
     claims.pop("att_sha256")
     receipt, key = _sign(claims, flattened=True)
@@ -310,8 +348,94 @@ def test_gcp_attestation_reuses_verifier_and_checks_commitment_membership(
     assert seen == {
         "document": b"fake.jwt.token",
         "policy": policy,
-        "nonce_hex": commitment,
+        "key_commitment_hex": commitment,
     }
+
+
+@pytest.mark.parametrize("commitment_position", [0, 2])
+def test_receipt_key_binding_accepts_nonce_membership_without_live_channel(
+    monkeypatch: pytest.MonkeyPatch, commitment_position: int
+) -> None:
+    policy = _mock_gcp_signature_and_policy(monkeypatch)
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw()
+    commitment = hashlib.sha256(b"inference-receipt-key-v1\x00" + public).hexdigest()
+    nonces = ["a" * 64, "b" * 64]
+    nonces.insert(commitment_position, commitment)
+    document = _gcp_key_attestation(nonces)
+    claims = _claims()
+    claims.pop("att_sha256")
+    receipt, _ = _sign(
+        claims,
+        key=key,
+        flattened=True,
+        header_updates={"att": document.decode("ascii")},
+    )
+
+    verified = verify_receipt(receipt, now=NOW)
+
+    assert verified.attestation_status == "verified"
+    with pytest.raises(AttestationVerificationError, match="TLS cert"):
+        verify_gateway_attestation(document, policy=policy, jwks={"keys": []})
+
+
+def test_receipt_key_binding_rejects_wrong_commitment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_gcp_signature_and_policy(monkeypatch)
+    document = _gcp_key_attestation(["a" * 64, "b" * 64, "c" * 64])
+    claims = _claims()
+    claims.pop("att_sha256")
+    receipt, _ = _sign(
+        claims,
+        flattened=True,
+        header_updates={"att": document.decode("ascii")},
+    )
+
+    with pytest.raises(ReceiptAttestationError, match="not present in JWT nonces"):
+        verify_receipt(receipt, now=NOW)
+
+
+def test_compact_receipt_verifies_supplied_pinned_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_gcp_signature_and_policy(monkeypatch)
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw()
+    commitment = hashlib.sha256(b"inference-receipt-key-v1\x00" + public).hexdigest()
+    document = _gcp_key_attestation(["a" * 64, "b" * 64, commitment])
+    claims = _claims()
+    claims["att_sha256"] = _digest(document)
+    receipt, _ = _sign(claims, key=key)
+
+    verified = verify_receipt(receipt, attestation=document, now=NOW)
+
+    assert verified.attestation_status == "verified"
+
+    changed = document[:-1] + bytes([document[-1] ^ 1])
+    with pytest.raises(ReceiptAttestationError, match="att_sha256 check failed"):
+        verify_receipt(receipt, attestation=changed, now=NOW)
+
+
+def test_flattened_receipt_rejects_mismatched_supplied_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_gcp_signature_and_policy(monkeypatch)
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw()
+    commitment = hashlib.sha256(b"inference-receipt-key-v1\x00" + public).hexdigest()
+    document = _gcp_key_attestation(["a" * 64, "b" * 64, commitment])
+    claims = _claims()
+    claims.pop("att_sha256")
+    receipt, _ = _sign(
+        claims,
+        key=key,
+        flattened=True,
+        header_updates={"att": document.decode("ascii")},
+    )
+
+    with pytest.raises(ReceiptAttestationError, match="does not match.*embedded"):
+        verify_receipt(receipt, attestation=document + b"x", now=NOW)
 
 
 def test_receipt_capture_preserves_wire_and_verifies(monkeypatch: pytest.MonkeyPatch) -> None:
