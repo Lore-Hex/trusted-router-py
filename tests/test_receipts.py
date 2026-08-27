@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -14,16 +15,19 @@ import trustedrouter.attestation as attestation_module
 import trustedrouter.receipts as receipts_module
 from trustedrouter.attestation import (
     GCP_ISSUER,
+    GCP_JWKS_URI,
     AttestationPolicy,
     AttestationVerificationError,
     verify_gateway_attestation,
 )
 from trustedrouter.receipts import (
     MissingAttestationError,
+    MissingBindingError,
     ReceiptAttestationError,
     ReceiptCapture,
     ReceiptHashError,
     ReceiptHeaderError,
+    ReceiptIssuerError,
     ReceiptNonceError,
     ReceiptSignatureError,
     ReceiptTimeError,
@@ -33,6 +37,7 @@ from trustedrouter.receipts import (
 )
 
 NOW = 1_756_223_999
+EXPECTED_ISSUER = "https://api.trustedrouter.com"
 
 
 def _b64(value: bytes) -> str:
@@ -170,6 +175,7 @@ def test_compact_receipt_verifies_bodies_with_explicit_attestation_escape() -> N
     receipt, _ = _sign(_claims())
     claims = verify_receipt(
         receipt,
+        expected_issuer=EXPECTED_ISSUER,
         request_body=b"request",
         response_body=b"response",
         expected_nonce="nonce_test",
@@ -184,6 +190,127 @@ def test_compact_receipt_verifies_bodies_with_explicit_attestation_escape() -> N
     assert claims.attestation_status == "unverified_by_this_sdk"
 
 
+def test_bindings_are_required_by_default_and_can_be_explicitly_disabled() -> None:
+    receipt, _ = _sign(_claims())
+
+    with pytest.raises(
+        MissingBindingError,
+        match="missing request_body and response_body or response_stream",
+    ):
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+        )
+
+    claims = verify_receipt(
+        receipt,
+        expected_issuer=EXPECTED_ISSUER,
+        now=NOW,
+        require_attestation=False,
+        require_bindings=False,
+    )
+    assert claims.iss == EXPECTED_ISSUER
+
+
+def test_partial_bindings_fail_closed_by_default() -> None:
+    receipt, _ = _sign(_claims())
+
+    with pytest.raises(MissingBindingError, match="missing response_body or response_stream"):
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            request_body=b"request",
+            now=NOW,
+            require_attestation=False,
+        )
+    with pytest.raises(MissingBindingError, match="missing request_body"):
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            response_body=b"response",
+            now=NOW,
+            require_attestation=False,
+        )
+
+
+def test_expected_issuer_exact_match_passes_and_mismatch_is_typed() -> None:
+    receipt, _ = _sign(_claims())
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=EXPECTED_ISSUER,
+        now=NOW,
+        require_attestation=False,
+        require_bindings=False,
+    )
+    assert verified.iss == EXPECTED_ISSUER
+
+    with pytest.raises(ReceiptIssuerError, match="iss claim check failed: expected"):
+        verify_receipt(
+            receipt,
+            expected_issuer="https://other.example",
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("receipt_issuer", "expected_issuer"),
+    [
+        ("https://API.TrustedRouter.COM/", "HTTPS://api.trustedrouter.com"),
+        ("https://API.TrustedRouter.COM:8443/", "https://api.trustedrouter.com:8443"),
+    ],
+)
+def test_issuer_origin_normalization(
+    receipt_issuer: str,
+    expected_issuer: str,
+) -> None:
+    claims = _claims()
+    claims["iss"] = receipt_issuer
+    receipt, _ = _sign(claims)
+
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=expected_issuer,
+        now=NOW,
+        require_attestation=False,
+        require_bindings=False,
+    )
+    assert verified.iss == receipt_issuer
+
+
+def test_issuer_port_must_match_exactly_after_normalization() -> None:
+    claims = _claims()
+    claims["iss"] = f"{EXPECTED_ISSUER}:8443"
+    receipt, _ = _sign(claims)
+
+    with pytest.raises(ReceiptIssuerError, match="iss claim check failed: expected"):
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
+
+
+def test_http_receipt_issuer_is_rejected() -> None:
+    claims = _claims()
+    claims["iss"] = "http://api.trustedrouter.com"
+    receipt, _ = _sign(claims)
+
+    with pytest.raises(ReceiptIssuerError, match="must use https"):
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
+
+
 def test_flipped_payload_byte_fails_signature() -> None:
     receipt, _ = _sign(_claims())
     assert isinstance(receipt, str)
@@ -192,14 +319,26 @@ def test_flipped_payload_byte_fails_signature() -> None:
     payload_bytes[-2] ^= 1
     tampered = f"{protected}.{_b64(bytes(payload_bytes))}.{signature}"
     with pytest.raises(ReceiptSignatureError, match="signature check failed"):
-        verify_receipt(tampered, now=NOW, require_attestation=False)
+        verify_receipt(
+            tampered,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_resigned_with_wrong_key_fails_signature() -> None:
     key = Ed25519PrivateKey.generate()
     receipt, _ = _sign(_claims(), key=key, signing_key=Ed25519PrivateKey.generate())
     with pytest.raises(ReceiptSignatureError, match="signature check failed"):
-        verify_receipt(receipt, now=NOW, require_attestation=False)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_edited_claim_without_resigning_fails_signature() -> None:
@@ -210,19 +349,37 @@ def test_edited_claim_without_resigning_fails_signature() -> None:
     claims["model"]["selected"] = "tampered"
     edited = f"{protected}.{_b64(json.dumps(claims).encode())}.{signature}"
     with pytest.raises(ReceiptSignatureError, match="signature check failed"):
-        verify_receipt(edited, now=NOW, require_attestation=False)
+        verify_receipt(
+            edited,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_wrong_kid_fails_header_check_before_signature() -> None:
     receipt, _ = _sign(_claims(), header_updates={"kid": _digest(b"wrong")})
     with pytest.raises(ReceiptHeaderError, match="kid check failed"):
-        verify_receipt(receipt, now=NOW, require_attestation=False)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_stream_byte_flip_fails_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     receipt, stream = _stream_receipt(monkeypatch)
     with pytest.raises(ReceiptHashError, match="stream hash check failed"):
-        verify_receipt(receipt, response_stream=stream.replace(b"hello", b"jello"), now=NOW)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            request_body=b"request",
+            response_stream=stream.replace(b"hello", b"jello"),
+            now=NOW,
+        )
 
 
 def test_receipt_must_be_last_before_done(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,13 +387,25 @@ def test_receipt_must_be_last_before_done(monkeypatch: pytest.MonkeyPatch) -> No
     extra = b'data: {"choices":[]}\n\n'
     tampered = stream.replace(b"data: [DONE]", extra + b"data: [DONE]")
     with pytest.raises(ReceiptHashError, match="not the last data event"):
-        verify_receipt(receipt, response_stream=tampered, now=NOW)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            request_body=b"request",
+            response_stream=tampered,
+            now=NOW,
+        )
 
 
 def test_stream_events_off_by_one_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     receipt, stream = _stream_receipt(monkeypatch, events_claim=2)
     with pytest.raises(ReceiptHashError, match="events check failed"):
-        verify_receipt(receipt, response_stream=stream, now=NOW)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            request_body=b"request",
+            response_stream=stream,
+            now=NOW,
+        )
 
 
 def test_responses_named_event_domain_and_crlf_verify(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,7 +428,13 @@ def test_responses_named_event_domain_and_crlf_verify(monkeypatch: pytest.Monkey
         + receipt_event
         + b"data: [DONE]\r\n\r\n"
     )
-    verified = verify_receipt(receipt, response_stream=stream, now=NOW)
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=EXPECTED_ISSUER,
+        request_body=b"request",
+        response_stream=stream,
+        now=NOW,
+    )
     assert verified.route == "responses"
     assert verified.resp.events == 1
 
@@ -269,7 +444,13 @@ def test_future_iat_fails() -> None:
     claims["iat"] = NOW + 61
     receipt, _ = _sign(claims)
     with pytest.raises(ReceiptTimeError, match="future-skew check failed"):
-        verify_receipt(receipt, now=NOW, require_attestation=False)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_max_age_fails_for_an_old_receipt() -> None:
@@ -277,9 +458,11 @@ def test_max_age_fails_for_an_old_receipt() -> None:
     with pytest.raises(ReceiptTimeError, match="max-age check failed"):
         verify_receipt(
             receipt,
+            expected_issuer=EXPECTED_ISSUER,
             now=NOW + 11,
             max_age_seconds=10,
             require_attestation=False,
+            require_bindings=False,
         )
 
 
@@ -288,7 +471,13 @@ def test_expired_tee_verified_window_fails() -> None:
     claims["upstream"]["verification_expires_at"] = NOW
     receipt, _ = _sign(claims)
     with pytest.raises(ReceiptUpstreamError, match="tee-verified window check failed"):
-        verify_receipt(receipt, now=NOW, require_attestation=False)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_nonce_mismatch_fails() -> None:
@@ -296,9 +485,11 @@ def test_nonce_mismatch_fails() -> None:
     with pytest.raises(ReceiptNonceError, match="nonce match check failed"):
         verify_receipt(
             receipt,
+            expected_issuer=EXPECTED_ISSUER,
             expected_nonce="different",
             now=NOW,
             require_attestation=False,
+            require_bindings=False,
         )
 
 
@@ -308,13 +499,24 @@ def test_unsupported_attestation_kind_fails_closed(kind: str) -> None:
     claims.pop("att_sha256")
     receipt, _ = _sign(claims, flattened=True, header_updates={"att_kind": kind})
     with pytest.raises(UnsupportedAttestationError, match="not supported"):
-        verify_receipt(receipt, now=NOW, require_attestation=False)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_missing_attestation_fails_by_default_for_both_delivery_forms() -> None:
     compact, _ = _sign(_claims())
     with pytest.raises(MissingAttestationError, match="compact receipts omit"):
-        verify_receipt(compact, now=NOW)
+        verify_receipt(
+            compact,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_bindings=False,
+        )
 
     claims = _claims()
     claims.pop("att_sha256")
@@ -324,7 +526,13 @@ def test_missing_attestation_fails_by_default_for_both_delivery_forms() -> None:
         header_updates={"att": None, "att_kind": None},
     )
     with pytest.raises(MissingAttestationError, match="no att_kind"):
-        verify_receipt(flattened, now=NOW, require_attestation=False)
+        verify_receipt(
+            flattened,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_attestation=False,
+            require_bindings=False,
+        )
 
 
 def test_gcp_attestation_reuses_verifier_and_checks_commitment_membership(
@@ -341,7 +549,12 @@ def test_gcp_attestation_reuses_verifier_and_checks_commitment_membership(
     claims = _claims()
     claims.pop("att_sha256")
     receipt, key = _sign(claims, flattened=True)
-    verified = verify_receipt(receipt, now=NOW)
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=EXPECTED_ISSUER,
+        now=NOW,
+        require_bindings=False,
+    )
     public = key.public_key().public_bytes_raw()
     commitment = hashlib.sha256(b"inference-receipt-key-v1\x00" + public).hexdigest()
     assert verified.attestation_status == "verified"
@@ -350,6 +563,54 @@ def test_gcp_attestation_reuses_verifier_and_checks_commitment_membership(
         "policy": policy,
         "key_commitment_hex": commitment,
     }
+
+
+def test_receipt_issuer_is_never_used_to_fetch_verification_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_issuer = "https://evil.example"
+    policy = AttestationPolicy(expected_image_digest="sha256:abc123")
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes_raw()
+    commitment = hashlib.sha256(b"inference-receipt-key-v1\x00" + public).hexdigest()
+    document = _gcp_key_attestation([commitment])
+    claims = _claims()
+    claims["iss"] = hostile_issuer
+    claims.pop("att_sha256")
+    receipt, _ = _sign(
+        claims,
+        key=key,
+        flattened=True,
+        header_updates={"att": document.decode("ascii")},
+    )
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, Any]:
+            return {"keys": []}
+
+    def guarded_get(_client: Any, url: str) -> FakeResponse:
+        requested_urls.append(url)
+        if urlsplit(url).hostname == urlsplit(hostile_issuer).hostname:
+            pytest.fail("receipt issuer was dereferenced for verification material")
+        return FakeResponse()
+
+    monkeypatch.setattr(receipts_module, "policy_from_trust_release", lambda: policy)
+    monkeypatch.setattr(attestation_module, "_verify_rs256", lambda *_args: None)
+    monkeypatch.setattr(attestation_module.httpx.Client, "get", guarded_get)
+
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=hostile_issuer,
+        now=NOW,
+        require_bindings=False,
+    )
+
+    assert verified.iss == hostile_issuer
+    assert requested_urls == [GCP_JWKS_URI]
 
 
 @pytest.mark.parametrize("commitment_position", [0, 2])
@@ -372,7 +633,12 @@ def test_receipt_key_binding_accepts_nonce_membership_without_live_channel(
         header_updates={"att": document.decode("ascii")},
     )
 
-    verified = verify_receipt(receipt, now=NOW)
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=EXPECTED_ISSUER,
+        now=NOW,
+        require_bindings=False,
+    )
 
     assert verified.attestation_status == "verified"
     with pytest.raises(AttestationVerificationError, match="TLS cert"):
@@ -393,7 +659,12 @@ def test_receipt_key_binding_rejects_wrong_commitment(
     )
 
     with pytest.raises(ReceiptAttestationError, match="not present in JWT nonces"):
-        verify_receipt(receipt, now=NOW)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            now=NOW,
+            require_bindings=False,
+        )
 
 
 def test_compact_receipt_verifies_supplied_pinned_attestation(
@@ -408,13 +679,25 @@ def test_compact_receipt_verifies_supplied_pinned_attestation(
     claims["att_sha256"] = _digest(document)
     receipt, _ = _sign(claims, key=key)
 
-    verified = verify_receipt(receipt, attestation=document, now=NOW)
+    verified = verify_receipt(
+        receipt,
+        expected_issuer=EXPECTED_ISSUER,
+        attestation=document,
+        now=NOW,
+        require_bindings=False,
+    )
 
     assert verified.attestation_status == "verified"
 
     changed = document[:-1] + bytes([document[-1] ^ 1])
     with pytest.raises(ReceiptAttestationError, match="att_sha256 check failed"):
-        verify_receipt(receipt, attestation=changed, now=NOW)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            attestation=changed,
+            now=NOW,
+            require_bindings=False,
+        )
 
 
 def test_flattened_receipt_rejects_mismatched_supplied_attestation(
@@ -435,7 +718,13 @@ def test_flattened_receipt_rejects_mismatched_supplied_attestation(
     )
 
     with pytest.raises(ReceiptAttestationError, match="does not match.*embedded"):
-        verify_receipt(receipt, attestation=document + b"x", now=NOW)
+        verify_receipt(
+            receipt,
+            expected_issuer=EXPECTED_ISSUER,
+            attestation=document + b"x",
+            now=NOW,
+            require_bindings=False,
+        )
 
 
 def test_receipt_capture_preserves_wire_and_verifies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -445,7 +734,14 @@ def test_receipt_capture_preserves_wire_and_verifies(monkeypatch: pytest.MonkeyP
     assert b"".join(capture) == stream
     assert capture.captured_bytes == stream
     assert capture.receipt == receipt
-    assert capture.verify(now=NOW).jti == "chatcmpl-test"
+    assert (
+        capture.verify(
+            expected_issuer=EXPECTED_ISSUER,
+            request_body=b"request",
+            now=NOW,
+        ).jti
+        == "chatcmpl-test"
+    )
 
 
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "receipts"
@@ -498,6 +794,7 @@ def test_frozen_enclave_receipt_fixtures(
     kwargs: dict[str, Any] = (
         json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
     )
+    kwargs["expected_issuer"] = EXPECTED_ISSUER
     request_path = _fixture_companion(receipt_path, "request.body")
     response_path = _fixture_companion(receipt_path, "response.body")
     stream_path = _fixture_companion(receipt_path, "response.sse")

@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from trustedrouter.attestation import (
     policy_from_trust_release,
@@ -42,6 +43,14 @@ class ReceiptSignatureError(ReceiptVerificationError):
 
 class ReceiptClaimsError(ReceiptVerificationError):
     """A required receipt claim is missing, malformed, or unsupported."""
+
+
+class MissingBindingError(ReceiptClaimsError):
+    """Required caller traffic for a receipt digest binding is absent."""
+
+
+class ReceiptIssuerError(ReceiptClaimsError):
+    """The receipt issuer is invalid or does not match the caller's pin."""
 
 
 class ReceiptTimeError(ReceiptClaimsError):
@@ -316,6 +325,63 @@ def _optional_str(claims: Mapping[str, Any], name: str, *, family: str = "claims
     return value
 
 
+def _canonical_https_origin(value: Any, *, check: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ReceiptIssuerError(f"{check} check failed: required HTTPS origin is missing")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ReceiptIssuerError(f"{check} check failed: invalid HTTPS origin") from exc
+    if parsed.scheme.lower() != "https":
+        raise ReceiptIssuerError(f"{check} check failed: issuer origin must use https")
+    if (
+        parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ReceiptIssuerError(
+            f"{check} check failed: expected an origin with no path, query, or fragment"
+        )
+    host = parsed.hostname.lower()
+    if any(character.isspace() for character in host):
+        raise ReceiptIssuerError(f"{check} check failed: invalid HTTPS origin host")
+    if ":" in host:
+        host = f"[{host}]"
+    canonical = f"https://{host}{f':{port}' if port is not None else ''}"
+    normalized_input = value[:-1] if value.endswith("/") else value
+    if normalized_input.lower() != canonical:
+        raise ReceiptIssuerError(f"{check} check failed: invalid HTTPS origin")
+    return canonical
+
+
+def _require_traffic_bindings(
+    *,
+    request_body: bytes | bytearray | memoryview | None,
+    response_body: bytes | bytearray | memoryview | None,
+    response_stream: bytes | bytearray | memoryview | None,
+    require_bindings: bool,
+) -> None:
+    if require_bindings is False:
+        return
+    missing_request = request_body is None
+    missing_response = response_body is None and response_stream is None
+    if missing_request and missing_response:
+        raise MissingBindingError(
+            "receipt binding check failed: missing request_body and "
+            "response_body or response_stream"
+        )
+    if missing_request:
+        raise MissingBindingError("receipt binding check failed: missing request_body")
+    if missing_response:
+        raise MissingBindingError(
+            "receipt binding check failed: missing response_body or response_stream"
+        )
+
+
 def _integer(value: Any, *, check: str, error_type: type[ReceiptClaimsError]) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise error_type(f"{check} check failed: expected an integer")
@@ -574,6 +640,7 @@ def _attestation_status(
 def verify_receipt(
     receipt: str | bytes | Mapping[str, Any],
     *,
+    expected_issuer: str,
     request_body: bytes | bytearray | memoryview | None = None,
     response_body: bytes | bytearray | memoryview | None = None,
     response_stream: bytes | bytearray | memoryview | None = None,
@@ -582,8 +649,16 @@ def verify_receipt(
     now: int | float | None = None,
     attestation: bytes | None = None,
     require_attestation: bool = True,
+    require_bindings: bool = True,
 ) -> ReceiptClaims:
     """Verify a compact or flattened inference receipt and return typed claims.
+
+    ``expected_issuer`` pins the receipt to an HTTPS origin after normalizing
+    the scheme and host case and removing one trailing slash. Request bytes
+    and exactly one response representation are required by default so the
+    signed digests are bound to the caller's traffic. Passing
+    ``require_bindings=False`` explicitly permits signature-only or partial
+    binding inspection.
 
     Compact receipts cannot carry their attestation document. Pass its exact
     bytes as ``attestation=`` to check the pinned digest and verify the key
@@ -592,6 +667,15 @@ def verify_receipt(
     Flattened receipts always verify their embedded evidence; if
     ``attestation=`` is also supplied, it must equal the embedded document.
     """
+    _require_traffic_bindings(
+        request_body=request_body,
+        response_body=response_body,
+        response_stream=response_stream,
+        require_bindings=require_bindings,
+    )
+    canonical_expected_issuer = _canonical_https_origin(
+        expected_issuer, check="expected_issuer"
+    )
     envelope = _parse_envelope(receipt)
     header, public_key = _parse_header(envelope)
     payload_bytes = _verify_signature(envelope, public_key)
@@ -604,6 +688,14 @@ def verify_receipt(
     rv = payload.get("rv")
     if not isinstance(rv, int) or isinstance(rv, bool) or rv != 1:
         raise ReceiptClaimsError(f"rv claim check failed: expected integer 1, got {rv!r}")
+
+    iss = _required_str(payload, "iss")
+    canonical_issuer = _canonical_https_origin(iss, check="iss claim")
+    if not hmac.compare_digest(canonical_issuer, canonical_expected_issuer):
+        raise ReceiptIssuerError(
+            "iss claim check failed: "
+            f"expected {canonical_expected_issuer!r}, got {canonical_issuer!r}"
+        )
 
     iat = _integer(payload.get("iat"), check="iat claim", error_type=ReceiptTimeError)
     if now is None:
@@ -737,7 +829,6 @@ def verify_receipt(
                 f"receipt claims {resp.events}"
             )
 
-    iss = _required_str(payload, "iss")
     jti = _required_str(payload, "jti")
     gen = _optional_str(payload, "gen")
     route = _required_str(payload, "route")
@@ -823,8 +914,8 @@ class ReceiptCapture(Iterator[bytes]):
             if embedded is not None:
                 self._receipt = dict(embedded)
 
-    def verify(self, **kwargs: Any) -> ReceiptClaims:
-        """Verify the discovered flattened receipt against all captured SSE bytes."""
+    def verify(self, *, expected_issuer: str, **kwargs: Any) -> ReceiptClaims:
+        """Verify the captured receipt and SSE bytes against a pinned issuer."""
         if self._receipt is None:
             self._refresh_receipt()
         if self._receipt is None:
@@ -833,11 +924,17 @@ class ReceiptCapture(Iterator[bytes]):
             )
         if "response_stream" in kwargs:
             raise TypeError("ReceiptCapture.verify supplies response_stream from captured bytes")
-        return verify_receipt(self._receipt, response_stream=bytes(self._wire), **kwargs)
+        return verify_receipt(
+            self._receipt,
+            expected_issuer=expected_issuer,
+            response_stream=bytes(self._wire),
+            **kwargs,
+        )
 
 
 __all__ = [
     "MissingAttestationError",
+    "MissingBindingError",
     "ReceiptAttestationError",
     "ReceiptCapture",
     "ReceiptClaims",
@@ -845,6 +942,7 @@ __all__ = [
     "ReceiptHashClaims",
     "ReceiptHashError",
     "ReceiptHeaderError",
+    "ReceiptIssuerError",
     "ReceiptModelClaims",
     "ReceiptNonceError",
     "ReceiptSignatureError",
