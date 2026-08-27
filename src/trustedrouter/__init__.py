@@ -98,6 +98,7 @@ from trustedrouter.oauth import (
 )
 from trustedrouter.receipts import (
     MissingAttestationError,
+    MissingBindingError,
     ReceiptAttestationError,
     ReceiptCapture,
     ReceiptClaims,
@@ -105,6 +106,7 @@ from trustedrouter.receipts import (
     ReceiptHashClaims,
     ReceiptHashError,
     ReceiptHeaderError,
+    ReceiptIssuerError,
     ReceiptModelClaims,
     ReceiptNonceError,
     ReceiptSignatureError,
@@ -170,6 +172,7 @@ __all__ = [
     "MessagesResponse",
     "MessagesUsage",
     "MissingAttestationError",
+    "MissingBindingError",
     "ModelInfo",
     "ModelList",
     "ModelPricing",
@@ -190,6 +193,7 @@ __all__ = [
     "ReceiptHashClaims",
     "ReceiptHashError",
     "ReceiptHeaderError",
+    "ReceiptIssuerError",
     "ReceiptModelClaims",
     "ReceiptNonceError",
     "ReceiptSignatureError",

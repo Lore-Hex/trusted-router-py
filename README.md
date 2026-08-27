@@ -386,6 +386,28 @@ TLS cert mismatch. Never returns falsey for a failed verification.
 This codepath needs `cryptography`; install with
 `pip install trusted-router-py[attestation]`.
 
+## Receipt verification
+
+Receipt verification pins the signed issuer and, by default, requires the exact
+request and response bytes so a valid signature cannot be mistaken for proof
+about different traffic:
+
+```python
+from trustedrouter import verify_receipt
+
+claims = verify_receipt(
+    receipt_jws,
+    expected_issuer="https://api.trustedrouter.com",
+    request_body=serialized_request,
+    response_body=response_bytes,
+    expected_nonce=request_nonce,
+)
+```
+
+For deliberate signature-only inspection, pass `require_bindings=False`. For
+compact receipts whose pinned attestation document is unavailable, separately
+pass `require_attestation=False`; both escape hatches must be explicit.
+
 ## Bring your own httpx client
 
 Pass `client=` if you need a custom transport (cert pinning, retries you
