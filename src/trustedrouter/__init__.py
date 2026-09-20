@@ -124,7 +124,7 @@ from trustedrouter.session import (
     verify_gateway_session,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "ADVISOR_MODEL",
