@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from typing import Any, TypeVar
 
 import httpx
@@ -69,11 +69,11 @@ T = TypeVar("T")
 _REPLAY_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
-def _has_idempotency_key(headers: dict[str, str]) -> bool:
+def _has_idempotency_key(headers: Mapping[str, str]) -> bool:
     return any(key.lower() == "idempotency-key" and bool(value) for key, value in headers.items())
 
 
-def _request_is_replayable(method: str, headers: dict[str, str]) -> bool:
+def _request_is_replayable(method: str, headers: Mapping[str, str]) -> bool:
     return method.upper() in _REPLAY_SAFE_METHODS or _has_idempotency_key(headers)
 
 
@@ -85,7 +85,7 @@ def _transport_failed_before_send(exc: httpx.TransportError) -> bool:
 
 def _response_retry_is_safe(
     method: str,
-    request_headers: dict[str, str],
+    request_headers: Mapping[str, str],
     response_headers: httpx.Headers,
 ) -> bool:
     return _request_is_replayable(method, request_headers) or (
@@ -140,7 +140,7 @@ def request_with_retry(
     (tests/test_features.py::test_max_retries_zero_disables_retry_loop_entirely).
     """
     kwargs = dict(kwargs)
-    attempt_headers = dict(kwargs.get("headers") or {})
+    attempt_headers = httpx.Headers(kwargs.get("headers") or {})
     kwargs["headers"] = attempt_headers
     # A redirect is a new request, outside the SDK retry policy and origin
     # allowlist.  Pin this per request so an injected follow_redirects=True
@@ -209,7 +209,7 @@ async def arequest_with_retry(
 ) -> httpx.Response:
     """Async twin of :func:`request_with_retry`."""
     kwargs = dict(kwargs)
-    attempt_headers = dict(kwargs.get("headers") or {})
+    attempt_headers = httpx.Headers(kwargs.get("headers") or {})
     kwargs["headers"] = attempt_headers
     kwargs["follow_redirects"] = False
     exhausted = False
@@ -288,7 +288,7 @@ def stream_events(
             if recorder is not None:
                 recorder.begin_attempt(base_url)
             req = dict(build_request(base_url))
-            req["headers"] = dict(req.get("headers") or {})
+            req["headers"] = httpx.Headers(req.get("headers") or {})
             req["follow_redirects"] = False
             _apply_reserved_headers(req, recorder)
             response_opened = False
@@ -378,7 +378,7 @@ async def astream_events(
             if recorder is not None:
                 recorder.begin_attempt(base_url)
             req = dict(build_request(base_url))
-            req["headers"] = dict(req.get("headers") or {})
+            req["headers"] = httpx.Headers(req.get("headers") or {})
             req["follow_redirects"] = False
             _apply_reserved_headers(req, recorder)
             response_opened = False

@@ -23,7 +23,10 @@ jobs:
           version: "latest"
       - run: uv sync --group dev
       - run: uv run ruff check .
+      - run: uv run python scripts/boundary_check.py
+      - run: uv run mypy
       - run: uv run pytest
+      - run: uv run python scripts/mutation_check.py
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:

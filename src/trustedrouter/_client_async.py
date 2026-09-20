@@ -128,13 +128,13 @@ class AsyncTrustedRouter:
         self._telemetry_sink = _telemetry_sink
         self._owns_telemetry_reporter = False
         self._telemetry_lock = threading.Lock()
-        default_headers = {"user-agent": _DEFAULT_USER_AGENT}
+        default_headers = httpx.Headers({"user-agent": _DEFAULT_USER_AGENT})
         if headers:
             default_headers.update(headers)
         # Preserve constructor headers for SDK requests without mutating an
         # injected caller-owned client's global defaults.
         _strip_reserved_headers(default_headers)
-        self._default_headers = dict(default_headers)
+        self._default_headers = httpx.Headers(default_headers)
         if client is not None:
             # Caller is responsible for the client's lifecycle (timeouts,
             # transport, verify, event hooks for cert pinning, etc.).
@@ -233,7 +233,7 @@ class AsyncTrustedRouter:
         timeout: float | httpx.Timeout | None = None,
         _base_url: str | None = None,
     ) -> dict[str, Any]:
-        merged_headers = dict(self._default_headers)
+        merged_headers = httpx.Headers(self._default_headers)
         if headers:
             merged_headers.update(headers)
         if idempotency_key:
@@ -288,8 +288,8 @@ class AsyncTrustedRouter:
             kwargs["idempotency_key"] = _new_idempotency_key()
         return await self.request(method, path, _base_url=self.control_base_url, **kwargs)
 
-    def _merged_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
-        merged = dict(self._default_headers)
+    def _merged_headers(self, headers: Mapping[str, str] | None) -> httpx.Headers:
+        merged = httpx.Headers(self._default_headers)
         if headers:
             merged.update(headers)
         return merged

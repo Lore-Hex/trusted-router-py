@@ -36,7 +36,7 @@ def _parse_sse_line(line: str) -> dict[str, Any] | None:
     if not payload or payload == "[DONE]":
         return None
     try:
-        decoded = jsonlib.loads(payload)
+        decoded: object = jsonlib.loads(payload)
     except jsonlib.JSONDecodeError as exc:
         raise _stream_protocol_error("Malformed JSON in TrustedRouter SSE data frame") from exc
     if not isinstance(decoded, dict):
@@ -64,7 +64,7 @@ def _event_from_sse_frame(lines: list[str]) -> dict[str, Any] | None:
     if not data or data == "[DONE]":
         return None
     try:
-        payload = jsonlib.loads(data)
+        payload: object = jsonlib.loads(data)
     except jsonlib.JSONDecodeError as exc:
         raise _stream_protocol_error("Malformed JSON in TrustedRouter SSE event") from exc
     if event_name and isinstance(payload, dict) and "event" not in payload:
@@ -133,10 +133,17 @@ async def _aiter_sse_events(response: httpx.Response) -> AsyncIterator[dict[str,
 
 
 def _delta_text(chunk: Mapping[str, Any]) -> str:
-    choices = chunk.get("choices") or []
+    choices = chunk.get("choices", [])
+    if not isinstance(choices, list):
+        raise _stream_protocol_error("Completion choices must be an array", payload=chunk)
     if not choices:
         return ""
-    delta = choices[0].get("delta") or {}
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        raise _stream_protocol_error("Completion choice must be an object", payload=chunk)
+    delta = first.get("delta", {})
+    if not isinstance(delta, Mapping):
+        raise _stream_protocol_error("Completion delta must be an object", payload=chunk)
     content = delta.get("content")
     return content if isinstance(content, str) else ""
 

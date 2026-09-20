@@ -11,6 +11,7 @@ from __future__ import annotations
 import platform
 import sys
 from collections.abc import Mapping, MutableMapping
+from importlib.metadata import PackageNotFoundError
 from typing import Any
 from urllib.parse import urlencode
 
@@ -176,7 +177,7 @@ def _user_agent() -> str:
         from importlib.metadata import version as _v
 
         v = _v("trusted-router-py")
-    except Exception:  # noqa: BLE001
+    except PackageNotFoundError:
         v = "unknown"
     py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     return f"trusted-router-py/{v} python/{py} httpx/{httpx.__version__} {platform.system()}"
@@ -196,10 +197,10 @@ def _build_stream_request(
     workspace_id: str | None = None,
     timeout: float | httpx.Timeout | None = None,
 ) -> dict[str, Any]:
-    headers: dict[str, str] = {
+    headers = httpx.Headers({
         "accept": "text/event-stream",
         "user-agent": _DEFAULT_USER_AGENT,
-    }
+    })
     if extra_headers:
         headers.update(extra_headers)
     if idempotency_key:

@@ -19,6 +19,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
+from importlib.metadata import PackageNotFoundError
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -48,6 +49,7 @@ from trustedrouter._constants import (
     TELEMETRY_SCHEMA_VERSION,
     TELEMETRY_TIMEOUT_PHASES,
 )
+from trustedrouter._headers import _header
 from trustedrouter._requests import _DEFAULT_USER_AGENT
 from trustedrouter._retry import _retry_after_seconds
 
@@ -111,7 +113,7 @@ def sdk_identity() -> dict[str, str]:
         from importlib.metadata import version
 
         sdk_version = version("trusted-router-py")
-    except Exception:  # noqa: BLE001
+    except PackageNotFoundError:
         sdk_version = "0.0.0"
     if len(sdk_version) > 32 or _SEMVER_RE.fullmatch(sdk_version) is None:
         sdk_version = "0.0.0"
@@ -746,7 +748,7 @@ class TelemetryReporter:
             self._drop_buffered_event_locked()
         try:
             estimated = len(json.dumps(event, separators=(",", ":"), default=str))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 -- Best-effort telemetry must never alter the inference result.
             estimated = 600
         event["_estimated_bytes"] = estimated
         self._events.append(event)
@@ -866,7 +868,7 @@ class TelemetryReporter:
                 ):
                     self._urgent_flush = True
                     self._wake.set()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 -- Best-effort telemetry must never alter the inference result.
             return
 
     def _window_size(self, window: _CounterWindow) -> int:
@@ -904,7 +906,7 @@ class TelemetryReporter:
     def _api_key(self) -> str | None:
         try:
             value = self._api_key_provider()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 -- Best-effort telemetry must never alter the inference result.
             return None
         return value if isinstance(value, str) and value else None
 
@@ -1036,8 +1038,9 @@ class TelemetryReporter:
 
     def _apply_policy_locked(self, response: httpx.Response, now: float) -> None:
         try:
-            payload = response.json()
-        except Exception:  # noqa: BLE001
+            payload: object = response.json()
+        except ValueError:
+            _logger.debug("Ignoring malformed optional telemetry policy JSON", exc_info=True)
             return
         policy = payload.get("policy") if isinstance(payload, Mapping) else None
         if not isinstance(policy, Mapping):
@@ -1136,7 +1139,7 @@ class TelemetryReporter:
                     f"{self.control_base_url}{DEFAULT_TELEMETRY_PATH}",
                     **kwargs,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 with self._lock:
                     self._set_backoff_locked(float(self._clock()))
                 if os.environ.get("TRUSTEDROUTER_TELEMETRY_STRICT") == "1":
@@ -1155,7 +1158,7 @@ class TelemetryReporter:
         """Synchronously attempt one flush; intended for deterministic tests."""
         try:
             return self._flush_once()
-        except Exception:  # noqa: BLE001
+        except Exception:
             if os.environ.get("TRUSTEDROUTER_TELEMETRY_STRICT") == "1":
                 raise
             return False
@@ -1184,7 +1187,7 @@ class TelemetryReporter:
                 self._flush_once()
                 with self._lock:
                     self._next_flush_at = float(self._clock()) + self.flush_seconds
-        except Exception:  # noqa: BLE001
+        except Exception:
             if os.environ.get("TRUSTEDROUTER_TELEMETRY_STRICT") == "1":
                 raise
 
@@ -1195,13 +1198,13 @@ class TelemetryReporter:
         if client is not None:
             try:
                 client.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 -- Best-effort telemetry must never alter the inference result.
                 _logger.debug("trustedrouter telemetry client close failed", exc_info=True)
 
     def _final_flush(self, timeout: float) -> None:
         try:
             self._flush_once(timeout=timeout)
-        except Exception:  # noqa: BLE001
+        except Exception:
             if os.environ.get("TRUSTEDROUTER_TELEMETRY_STRICT") == "1":
                 raise
         finally:
@@ -1258,13 +1261,6 @@ def _duration_ms(start: float, end: float | None = None) -> int:
     elapsed = (time.perf_counter() if end is None else end) - start
     return min(_MAX_DURATION_MS, max(0, int(elapsed * 1000)))
 
-
-def _header(headers: Mapping[str, str], name: str) -> str | None:
-    wanted = name.lower()
-    for key, value in headers.items():
-        if key.lower() == wanted:
-            return value
-    return None
 
 
 class RequestRecorder:
@@ -1597,6 +1593,6 @@ class RequestRecorder:
         self._finished = True
         try:
             self._finish(exhausted=exhausted)
-        except Exception:  # noqa: BLE001
+        except Exception:
             if os.environ.get("TRUSTEDROUTER_TELEMETRY_STRICT") == "1":
                 raise

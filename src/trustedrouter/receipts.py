@@ -155,11 +155,13 @@ def _json_object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _load_json(data: str | bytes, *, check: str) -> Any:
+def _load_json(data: str | bytes, *, check: str) -> object:
     try:
-        return json.loads(data, object_pairs_hook=_json_object_no_duplicates)
+        decoded: object = json.loads(data, object_pairs_hook=_json_object_no_duplicates)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ReceiptStructureError(f"{check} check failed: invalid JSON: {exc}") from exc
+    else:
+        return decoded
 
 
 def _b64url_decode(value: str, *, check: str, allow_empty: bool = False) -> bytes:
@@ -267,7 +269,11 @@ def _parse_header(envelope: _JWSEnvelope) -> tuple[Mapping[str, Any], bytes]:
         )
     kid = header.get("kid")
     expected_kid = _b64url_encode(hashlib.sha256(public_key).digest())
-    if not isinstance(kid, str) or not hmac.compare_digest(kid, expected_kid):
+    if (
+        not isinstance(kid, str)
+        or not kid.isascii()
+        or not hmac.compare_digest(kid, expected_kid)
+    ):
         raise ReceiptHeaderError(
             "protected header kid check failed: kid does not equal b64url(sha256(jwk.x))"
         )
@@ -403,7 +409,7 @@ def _digest_claim(record: Mapping[str, Any], *, name: str, response: bool) -> Re
         raise ReceiptHashError(f"{name}.hash check failed: SHA-256 digest must be 32 bytes")
     of = record.get("of")
     allowed = {"body", "sse-data-v1", "sse-events-v1"} if response else {"body"}
-    if of not in allowed:
+    if not isinstance(of, str) or of not in allowed:
         raise ReceiptHashError(f"{name}.of check failed: unsupported hash domain {of!r}")
     events_value = record.get("events")
     events: int | None = None
@@ -479,9 +485,9 @@ def _next_sse_event(data: bytes, offset: int) -> tuple[bytes, int] | None:
 
 def _embedded_receipt(payload: bytes) -> Mapping[str, Any] | None:
     try:
-        decoded = json.loads(payload, object_pairs_hook=_json_object_no_duplicates)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return None
+        decoded: object = json.loads(payload, object_pairs_hook=_json_object_no_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ReceiptHashError("response stream contains malformed JSON") from exc
     if not isinstance(decoded, Mapping) or "inference_receipt" not in decoded:
         return None
     receipt = decoded["inference_receipt"]
@@ -599,7 +605,7 @@ def _attestation_status(
     else:
         kind = header.get("att_kind")
         embedded = header.get("att")
-        if kind in {"aws-nitro-cose", "azure-maa-jwt"}:
+        if kind in ("aws-nitro-cose", "azure-maa-jwt"):
             raise UnsupportedAttestationError(
                 f"attestation kind check failed: {kind!r} is not supported by this SDK"
             )
@@ -691,7 +697,7 @@ def verify_receipt(
 
     iss = _required_str(payload, "iss")
     canonical_issuer = _canonical_https_origin(iss, check="iss claim")
-    if not hmac.compare_digest(canonical_issuer, canonical_expected_issuer):
+    if not hmac.compare_digest(canonical_issuer.encode(), canonical_expected_issuer.encode()):
         raise ReceiptIssuerError(
             "iss claim check failed: "
             f"expected {canonical_expected_issuer!r}, got {canonical_issuer!r}"

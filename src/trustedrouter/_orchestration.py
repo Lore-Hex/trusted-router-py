@@ -8,7 +8,7 @@ Wire schemas here are pinned by the cross-SDK parity tests
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 from trustedrouter._constants import (
     ADVISOR_MODEL,
@@ -211,8 +211,8 @@ def subagent_tool(
 class ProviderPreferences(dict[str, Any]):
     """Typed provider routing preferences accepted by inference endpoints."""
 
-    _PRIVACY = {"any", "no_store", "zdr", "confidential", "e2e", "e2ee"}
-    _SORT = {"price", "latency", "throughput"}
+    _PRIVACY: ClassVar[set[str]] = {"any", "no_store", "zdr", "confidential", "e2e", "e2ee"}
+    _SORT: ClassVar[set[str]] = {"price", "latency", "throughput"}
 
     def __init__(
         self,

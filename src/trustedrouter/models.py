@@ -26,6 +26,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from trustedrouter._errors import _stream_protocol_error
+
 # ---- common config ------------------------------------------------------
 
 
@@ -148,17 +150,23 @@ class ModelInfo(_Base):
     per_request_limits: dict[str, Any] | None = None
     trustedrouter: dict[str, Any] | None = None  # TR-specific extension block
 
+    def _metadata_bool(self, name: str) -> bool:
+        value = (self.trustedrouter or {}).get(name, False)
+        if not isinstance(value, bool):
+            raise _stream_protocol_error(f"Model metadata {name} must be a boolean", payload=value)
+        return value
+
     @property
     def open_weights(self) -> bool:
-        return bool((self.trustedrouter or {}).get("open_weights"))
+        return self._metadata_bool("open_weights")
 
     @property
     def us_provider_available(self) -> bool:
-        return bool((self.trustedrouter or {}).get("us_provider_available"))
+        return self._metadata_bool("us_provider_available")
 
     @property
     def eu_focused_provider_available(self) -> bool:
-        return bool((self.trustedrouter or {}).get("eu_focused_provider_available"))
+        return self._metadata_bool("eu_focused_provider_available")
 
 
 class ModelList(_Base):

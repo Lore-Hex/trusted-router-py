@@ -25,7 +25,6 @@ and shouldn't pay the install cost.
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import hmac
 import json
@@ -34,7 +33,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import httpx
+import httpx as httpx
 
 from trustedrouter.client import (
     DEFAULT_TRUST_RELEASE_URL,
@@ -133,22 +132,12 @@ def policy_from_trust_release(
         image_reference = release_obj.image_reference
         accepted_image_references = tuple(release_obj.accepted_image_references)
     else:
-        image_digest = str(release_obj.get("image_digest") or "") or None
-        accepted_raw = release_obj.get("accepted_image_digests")
-        accepted_image_digests = (
-            tuple(str(value) for value in accepted_raw if isinstance(value, str) and value)
-            if isinstance(accepted_raw, list)
-            else ()
-        )
-        image_reference = str(release_obj.get("image_reference") or "") or None
-        accepted_references_raw = release_obj.get("accepted_image_references")
-        accepted_image_references = (
-            tuple(
-                str(value) for value in accepted_references_raw if isinstance(value, str) and value
-            )
-            if isinstance(accepted_references_raw, list)
-            else ()
-        )
+        if not isinstance(release_obj, Mapping):
+            raise AttestationVerificationError("trust release must be an object")
+        image_digest = _image_pin(release_obj, "image_digest")
+        accepted_image_digests = _image_pins(release_obj, "accepted_image_digests")
+        image_reference = _image_pin(release_obj, "image_reference")
+        accepted_image_references = _image_pins(release_obj, "accepted_image_references")
     if not accepted_image_digests and image_digest:
         accepted_image_digests = (image_digest,)
     if not accepted_image_references and image_reference:
@@ -175,6 +164,20 @@ def policy_from_trust_release(
     return policy
 
 
+def _image_pin(release: Mapping[str, Any], field: str) -> str | None:
+    value = release.get(field)
+    if value is not None and not isinstance(value, str):
+        raise AttestationVerificationError(f"trust release {field} must be a string or null")
+    return value or None
+
+
+def _image_pins(release: Mapping[str, Any], field: str) -> tuple[str, ...]:
+    value = release.get(field, [])
+    if not isinstance(value, list) or any(not isinstance(pin, str) or not pin for pin in value):
+        raise AttestationVerificationError(f"trust release {field} must be a string array")
+    return tuple(value)
+
+
 # ---- low-level JWT verification -----------------------------------------
 
 
@@ -192,11 +195,13 @@ def _jwt_split(token: bytes) -> tuple[dict[str, Any], dict[str, Any], bytes, byt
         raise AttestationVerificationError(f"expected 3 JWT segments, got {len(parts)}")
     h_b64, p_b64, s_b64 = parts
     try:
-        header = json.loads(_b64url_decode(h_b64))
-        payload = json.loads(_b64url_decode(p_b64))
+        header: object = json.loads(_b64url_decode(h_b64))
+        payload: object = json.loads(_b64url_decode(p_b64))
         signature = _b64url_decode(s_b64)
-    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (ValueError, UnicodeError) as exc:
         raise AttestationVerificationError(f"invalid JWT encoding: {exc}") from exc
+    if not isinstance(header, dict) or not isinstance(payload, dict):
+        raise AttestationVerificationError("JWT header and claims must be objects")
     signing_input = f"{h_b64}.{p_b64}".encode("ascii")
     return header, payload, signing_input, signature
 
@@ -222,7 +227,13 @@ def _verify_rs256(
             f"unsupported JWT alg {header.get('alg')!r}; expected RS256"
         )
     kid = header.get("kid")
-    keys = jwks.get("keys") or []
+    if not isinstance(kid, str) or not kid:
+        raise AttestationVerificationError("JWT kid must be a non-empty string")
+    if not isinstance(jwks, Mapping):
+        raise AttestationVerificationError("JWKS must be an object")
+    keys = jwks.get("keys")
+    if not isinstance(keys, list) or any(not isinstance(key, Mapping) for key in keys):
+        raise AttestationVerificationError("JWKS keys must be an array of objects")
     matching = next((k for k in keys if k.get("kid") == kid), None)
     if matching is None:
         raise AttestationVerificationError(
@@ -231,15 +242,22 @@ def _verify_rs256(
     if matching.get("kty") != "RSA":
         raise AttestationVerificationError("expected RSA key in JWKS")
 
+    modulus = matching.get("n")
+    exponent = matching.get("e")
+    if not isinstance(modulus, str) or not isinstance(exponent, str):
+        raise AttestationVerificationError("JWK n and e must be strings")
     try:
-        n_bytes = _b64url_decode(matching["n"])
-        e_bytes = _b64url_decode(matching["e"])
-    except (binascii.Error, KeyError) as exc:
+        n_bytes = _b64url_decode(modulus)
+        e_bytes = _b64url_decode(exponent)
+    except (ValueError, UnicodeError) as exc:
         raise AttestationVerificationError(f"malformed JWK: {exc}") from exc
 
     n = int.from_bytes(n_bytes, "big")
     e = int.from_bytes(e_bytes, "big")
-    public_key = rsa.RSAPublicNumbers(e=e, n=n).public_key()
+    try:
+        public_key = rsa.RSAPublicNumbers(e=e, n=n).public_key()
+    except ValueError as exc:
+        raise AttestationVerificationError("invalid RSA public numbers") from exc
     try:
         public_key.verify(signature, signing_input, padding.PKCS1v15(), hashes.SHA256())
     except InvalidSignature as exc:
@@ -278,11 +296,11 @@ def _check_claims(
         raise AttestationVerificationError("attested workload is not running Confidential Space")
     if claims.get("secboot") is not True:
         raise AttestationVerificationError("attested workload does not report Secure Boot")
-    if claims.get("hwmodel") not in {
+    if claims.get("hwmodel") not in (
         "GCP_AMD_SEV",
         "GCP_AMD_SEV_ES",
         "GCP_INTEL_TDX",
-    }:
+    ):
         raise AttestationVerificationError(
             f"unsupported confidential hardware model {claims.get('hwmodel')!r}"
         )
@@ -309,9 +327,16 @@ def _check_claims(
             "policy that cannot distinguish the gateway from any other workload"
         )
 
-    submods = (claims.get("submods") or {}).get("container") or {}
-    image_digest = submods.get("image_digest") or ""
-    image_reference = submods.get("image_reference") or ""
+    submods = claims.get("submods")
+    if not isinstance(submods, Mapping):
+        raise AttestationVerificationError("JWT submods must be an object")
+    container = submods.get("container")
+    if not isinstance(container, Mapping):
+        raise AttestationVerificationError("JWT container must be an object")
+    image_digest = container.get("image_digest", "")
+    image_reference = container.get("image_reference", "")
+    if not isinstance(image_digest, str) or not isinstance(image_reference, str):
+        raise AttestationVerificationError("JWT image identity must contain strings")
 
     accepted_image_digests = policy.expected_image_digests
     if not accepted_image_digests and policy.expected_image_digest:
@@ -338,6 +363,13 @@ def _check_claims(
     # but the JWT doesn't carry it, this is either a replay or a
     # misbehaving gateway — fail closed.
     eat_nonces = claims.get("eat_nonce")
+    for field in ("eat_nonce", "nonces"):
+        value = claims.get(field)
+        if value is not None and not (
+            isinstance(value, str)
+            or (isinstance(value, list) and all(isinstance(item, str) for item in value))
+        ):
+            raise AttestationVerificationError(f"JWT {field} must be a string or string array")
     nonces = eat_nonces or claims.get("nonces") or []
     nonce_match: str | None = None
     if isinstance(nonces, str):
@@ -412,11 +444,11 @@ def _check_claims(
 
     return GatewayAttestation(
         cert_sha256=cert_sha,
-        image_digest=str(image_digest),
-        image_reference=str(image_reference),
+        image_digest=image_digest,
+        image_reference=image_reference,
         nonce=nonce_match,
         expires_at=exp,
-        issuer=str(iss) if iss else None,
+        issuer=GCP_ISSUER,
         audience=policy.gcp_audience,
         raw_claims=dict(claims),
     )
@@ -446,7 +478,10 @@ def _fetch_jwks(url: str = GCP_JWKS_URI, *, timeout: float = 10.0) -> dict[str, 
     with httpx.Client(timeout=timeout) as client:
         response = client.get(url)
         response.raise_for_status()
-        data = response.json()
+        try:
+            data: object = response.json()
+        except ValueError as exc:
+            raise AttestationVerificationError("GCP JWKS returned malformed JSON") from exc
     if not isinstance(data, dict) or "keys" not in data:
         raise AttestationVerificationError(f"GCP JWKS at {url} returned unexpected shape")
     return data
@@ -538,12 +573,12 @@ def verify_receipt_key_attestation(
 
 
 __all__ = [
-    "AttestationPolicy",
-    "AttestationVerificationError",
     "EXPORTER_LABEL",
     "EXPORTER_LENGTH",
     "GCP_ISSUER",
     "GCP_JWKS_URI",
+    "AttestationPolicy",
+    "AttestationVerificationError",
     "GatewayAttestation",
     "policy_from_trust_release",
     "verify_gateway_attestation",

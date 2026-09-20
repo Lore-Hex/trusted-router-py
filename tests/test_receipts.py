@@ -717,7 +717,7 @@ def test_flattened_receipt_rejects_mismatched_supplied_attestation(
         header_updates={"att": document.decode("ascii")},
     )
 
-    with pytest.raises(ReceiptAttestationError, match="does not match.*embedded"):
+    with pytest.raises(ReceiptAttestationError, match=r"does not match.*embedded"):
         verify_receipt(
             receipt,
             expected_issuer=EXPECTED_ISSUER,
@@ -809,3 +809,40 @@ def test_frozen_enclave_receipt_fixtures(
         kwargs.setdefault("require_attestation", False)
     verified = verify_receipt(receipt_bytes, **kwargs)
     assert verified.rv == 1
+
+
+@pytest.mark.parametrize("case", ["kid", "domain", "kind"])
+def test_receipt_untrusted_scalar_shapes(case) -> None:
+    from trustedrouter.receipts import ReceiptVerificationError
+
+    claims = _claims()
+    updates: dict[str, Any] = {}
+    if case == "kid":
+        updates["kid"] = "é"
+    if case == "domain":
+        claims["resp"]["of"] = []
+    if case == "kind":
+        updates["att_kind"] = []
+    receipt, _ = _sign(claims, flattened=case == "kind", header_updates=updates)
+    with pytest.raises(ReceiptVerificationError):
+        verify_receipt(receipt, expected_issuer=EXPECTED_ISSUER, now=NOW,
+                       require_attestation=False, require_bindings=False)
+
+
+@pytest.mark.parametrize("payload", [
+    b"{broken", b'{"inference_receipt":{},"inference_receipt":{}}',
+])
+def test_embedded_receipt_malformed_json(payload) -> None:
+    with pytest.raises(ReceiptHashError):
+        receipts_module._embedded_receipt(payload)
+
+
+def test_unicode_issuer_is_typed() -> None:
+    from trustedrouter.receipts import ReceiptIssuerError
+
+    claims = _claims()
+    claims["iss"] = "https://é.example"
+    receipt, _ = _sign(claims)
+    with pytest.raises(ReceiptIssuerError):
+        verify_receipt(receipt, expected_issuer=EXPECTED_ISSUER, now=NOW,
+                       require_attestation=False, require_bindings=False)

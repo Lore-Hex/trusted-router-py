@@ -10,22 +10,28 @@ from __future__ import annotations
 import ipaddress
 import secrets
 import select
-import socket
+import socket as socket
 import time
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from trustedrouter.attestation import (
-    EXPORTER_LABEL,
-    EXPORTER_LENGTH,
+    EXPORTER_LABEL as EXPORTER_LABEL,
+)
+from trustedrouter.attestation import (
+    EXPORTER_LENGTH as EXPORTER_LENGTH,
+)
+from trustedrouter.attestation import (
     GCP_JWKS_URI,
     AttestationPolicy,
-    AttestationVerificationError,
     GatewayAttestation,
     verify_gateway_attestation,
+)
+from trustedrouter.attestation import (
+    AttestationVerificationError as AttestationVerificationError,
 )
 
 _TLS_IO_TIMEOUT_SECONDS = 15.0
@@ -46,11 +52,20 @@ class GatewaySession:
     connection: Any
     exporter: bytes
     leaf_der: bytes
+    # Private state is attached only after verification. Keep it type-visible
+    # without changing the public dataclass fields, constructor or serialization.
+    if TYPE_CHECKING:
+        _raw_socket: socket.socket | None = field(init=False)
+        _host_header: str | None = field(init=False)
+        _policy: AttestationPolicy | None = field(init=False)
+        _jwks: Mapping[str, Any] | None = field(init=False)
+        _jwks_url: str = field(init=False)
+        _timeout: float = field(init=False)
 
 
 def _load_pyopenssl() -> tuple[Any, Any]:
     try:
-        from OpenSSL import SSL, crypto  # type: ignore[import-not-found,import-untyped]
+        from OpenSSL import SSL, crypto
     except ImportError as exc:  # pragma: no cover - depends on local extras
         raise ImportError(
             "G6 TLS session verification requires pyOpenSSL; install with "
@@ -217,6 +232,8 @@ def _recv_or_fail(conn: Any, raw: socket.socket, context: str, *, deadline: floa
         )
     except SSL.ZeroReturnError as exc:
         raise EOFError(context) from exc
+    if not isinstance(chunk, bytes):
+        raise AttestationVerificationError("TLS recv must return bytes")
     if not chunk:
         raise EOFError(context)
     return chunk
@@ -398,8 +415,7 @@ def verify_gateway_session(
             what="handshake",
         )
         peer = conn.get_peer_certificate()
-        if peer is None:
-            raise AttestationVerificationError("TLS handshake returned no peer certificate")
+        _require_peer_certificate(peer)
         leaf_der = crypto.dump_certificate(crypto.FILETYPE_ASN1, peer)
         _assert_cert_matches_hostname(leaf_der, host)
         exporter = conn.export_keying_material(EXPORTER_LABEL, EXPORTER_LENGTH)
@@ -428,16 +444,17 @@ def verify_gateway_session(
             exporter=exporter,
             leaf_der=leaf_der,
         )
-        session._raw_socket = raw  # type: ignore[attr-defined]
-        session._host_header = host_header  # type: ignore[attr-defined]
-        session._policy = policy  # type: ignore[attr-defined]
-        session._jwks = jwks  # type: ignore[attr-defined]
-        session._jwks_url = jwks_url  # type: ignore[attr-defined]
-        session._timeout = timeout  # type: ignore[attr-defined]
-        return session
+        session._raw_socket = raw
+        session._host_header = host_header
+        session._policy = policy
+        session._jwks = jwks
+        session._jwks_url = jwks_url
+        session._timeout = timeout
     except Exception:
         _close_connection(conn, raw)
         raise
+    else:
+        return session
 
 
 def fetch_attestation_again(session: GatewaySession) -> GatewayAttestation:
@@ -489,3 +506,8 @@ __all__ = [
     "fetch_attestation_again",
     "verify_gateway_session",
 ]
+
+
+def _require_peer_certificate(peer: object) -> None:
+    if peer is None:
+        raise AttestationVerificationError("TLS handshake returned no peer certificate")

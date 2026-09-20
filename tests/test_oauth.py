@@ -284,11 +284,11 @@ def test_fetch_userinfo_gets_with_bearer_and_unwraps_data() -> None:
     assert req.headers["authorization"] == "Bearer sk-tr-v1-key"
 
 
-def test_fetch_userinfo_falls_back_to_whole_body_without_data_key() -> None:
+def test_fetch_userinfo_rejects_missing_data_key() -> None:
     flat = {"sub": "user_2", "email": "v@x.co"}
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=flat))
-    result = fetch_userinfo(api_key="k", client=httpx.Client(transport=transport))
-    assert result == flat
+    with pytest.raises(TrustedRouterError):
+        fetch_userinfo(api_key="k", client=httpx.Client(transport=transport))
 
 
 def test_fetch_userinfo_maps_auth_error() -> None:
@@ -387,3 +387,60 @@ def test_fetch_userinfo_async_owned_client() -> None:
         return await fetch_userinfo_async(api_key="k")
 
     assert _run(run()) == {"sub": "aowned"}
+
+
+@pytest.mark.asyncio
+async def test_auth_wire_fixtures() -> None:
+    from pathlib import Path
+
+    fixture_path = Path(__file__).parent / "fixtures/auth-wire-fixtures.json"
+    fixture = jsonlib.loads(fixture_path.read_bytes())
+    for endpoint, contract in fixture.items():
+        if endpoint not in {"exchange", "userinfo"}:
+            continue
+        for outcome in ("accept", "reject"):
+            for name, payload in contract[outcome].items():
+                def handler(request, payload=payload, endpoint=endpoint):
+                    expected = "/auth/keys" if endpoint == "exchange" else "/auth/userinfo"
+                    assert request.url.path == "/v1" + expected
+                    return httpx.Response(200, json=payload)
+
+                with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+                    async with httpx.AsyncClient(
+                        transport=httpx.MockTransport(handler)
+                    ) as async_client:
+                        if outcome == "reject":
+                            with pytest.raises(TrustedRouterError):
+                                if endpoint == "exchange":
+                                    exchange_oauth_key(code="code", client=client)
+                                else:
+                                    fetch_userinfo(api_key="key", client=client)
+                            with pytest.raises(TrustedRouterError):
+                                if endpoint == "exchange":
+                                    await exchange_oauth_key_async(code="code", client=async_client)
+                                else:
+                                    await fetch_userinfo_async(api_key="key", client=async_client)
+                        elif endpoint == "exchange":
+                            token = exchange_oauth_key(code="code", client=client)
+                            async_token = await exchange_oauth_key_async(
+                                code="code", client=async_client
+                            )
+                            for parsed in (token, async_token):
+                                assert parsed.key == payload["key"], name
+                                assert parsed.user_id == payload.get("user_id"), name
+                                assert parsed.identity == payload.get("identity"), name
+                                assert parsed.data == payload, name  # Includes every unknown field.
+                        else:
+                            assert fetch_userinfo(api_key="key", client=client) == payload["data"]
+                            assert await fetch_userinfo_async(
+                                api_key="key", client=async_client
+                            ) == payload["data"]
+    # Optional exposed fields also cannot be laundered; unknown metadata remains opaque.
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"key": "k", "user_id": 7})
+    )) as client, pytest.raises(TrustedRouterError):
+        exchange_oauth_key(code="code", client=client)
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"data": {"sub": None, "future": [1, {}]}})
+    )) as client:
+        assert fetch_userinfo(api_key="k", client=client)["future"] == [1, {}]

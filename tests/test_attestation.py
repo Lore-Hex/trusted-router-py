@@ -505,3 +505,91 @@ def test_rollout_policy_accepts_each_published_image_and_rejects_other() -> None
     nested["image_digest"] = "sha256:other"
     with pytest.raises(AttestationVerificationError, match="image_digest mismatch"):
         verify_gateway_attestation(_make_jwt(key, rejected), policy=policy, jwks=jwks)
+
+
+@pytest.mark.parametrize("release", [
+    [], 7, {"image_digest": 7}, {"image_reference": []},
+    {"image_digest": "ok", "accepted_image_digests": "bad"},
+    {"image_digest": "ok", "accepted_image_digests": ["ok", 7]},
+    {"image_digest": "ok", "accepted_image_references": [None]},
+])
+def test_release_pin_shapes(release) -> None:
+    with pytest.raises(AttestationVerificationError):
+        policy_from_trust_release(release)
+
+
+@pytest.mark.parametrize("header,payload", [(None, {}), ([], {}), ({}, None), ({}, []), (7, {})])
+def test_jwt_object_shapes(header, payload) -> None:
+    from trustedrouter.attestation import _jwt_split
+
+    token = f"{_b64url(json.dumps(header).encode())}.{_b64url(json.dumps(payload).encode())}.AA"
+    with pytest.raises(AttestationVerificationError):
+        _jwt_split(token.encode())
+
+
+def test_jwt_non_ascii_encoding() -> None:
+    from trustedrouter.attestation import _jwt_split
+
+    with pytest.raises(AttestationVerificationError):
+        _jwt_split(b"\xff.e30.AA")
+
+
+@pytest.mark.parametrize("jwks", [[], 7, {"keys": None}, {"keys": 7}, {"keys": [None]},
+                                  {"keys": [7]}, {"keys": "keys"}])
+def test_jwks_shapes(jwks) -> None:
+    from trustedrouter.attestation import _verify_rs256
+
+    with pytest.raises(AttestationVerificationError):
+        _verify_rs256(jwks, {"alg": "RS256", "kid": "k"}, b"x", b"x")
+
+
+@pytest.mark.parametrize("n,e", [(None, "AQAB"), (7, "AQAB"), ("é", "AQAB"),
+                                 ("AA", []), ("AA", "AA"), ("a", "AQAB")])
+def test_jwk_numbers(n, e) -> None:
+    from trustedrouter.attestation import _verify_rs256
+
+    with pytest.raises(AttestationVerificationError):
+        _verify_rs256({"keys": [{"kid": "k", "kty": "RSA", "n": n, "e": e}]},
+                      {"alg": "RS256", "kid": "k"}, b"x", b"x")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("hwmodel", []), ("submods", 7), ("submods", []),
+    ("submods", {"container": []}),
+    ("submods", {"container": {"image_digest": ["sha256:abc123"]}}),
+    ("submods", {"container": {"image_digest": "sha256:abc123", "image_reference": 0}}),
+    ("eat_nonce", 7), ("eat_nonce", {}), ("eat_nonce", [7]), ("nonces", 7),
+])
+def test_nested_claim_shapes(field, value) -> None:
+    from trustedrouter.attestation import _check_claims
+
+    claims = _good_claims()
+    claims[field] = value
+    with pytest.raises(AttestationVerificationError):
+        _check_claims(claims, policy=_policy(), nonce_hex=None,
+                      tls_cert_der=_FAKE_CERT, tls_exporter=None)
+
+
+def test_jwks_malformed_json(monkeypatch) -> None:
+    import httpx
+
+    from trustedrouter.attestation import _fetch_jwks
+
+    def get(self, url):
+        return httpx.Response(200, content=b"{broken", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    with pytest.raises(AttestationVerificationError):
+        _fetch_jwks()
+
+
+def test_jwks_kid_shape() -> None:
+    from trustedrouter.attestation import _verify_rs256
+
+    # Without the kid guard a missing JWT/JWK kid can match and validate a signature.
+    key = _gen_keypair()
+    jwk = _public_jwk(key)
+    jwk.pop("kid")
+    signature = key.sign(b"signed", padding.PKCS1v15(), hashes.SHA256())
+    with pytest.raises(AttestationVerificationError):
+        _verify_rs256({"keys": [jwk]}, {"alg": "RS256"}, b"signed", signature)
