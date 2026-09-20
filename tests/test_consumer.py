@@ -25,7 +25,7 @@ SOURCES = {
     "_retry.py", "_routing.py", "_sse.py", "_telemetry.py", "_transport.py",
     "attestation.py", "client.py", "models.py", "oauth.py", "py.typed", "receipts.py", "session.py",
 }
-DIST = "trusted_router_py-0.7.0"
+DIST = "trusted_router_py-0.8.0"
 UV = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
 
 
@@ -160,8 +160,8 @@ class Case:
 
 
 CASES = [
-    Case("version", ["--version"], "trustedrouter 0.7.0"),
-    Case("version-json", ["--json", "--version"], "0.7.0", command="version"),
+    Case("version", ["--version"], "trustedrouter 0.8.0"),
+    Case("version-json", ["--json", "--version"], "0.8.0", command="version"),
     Case("unknown", ["--json", "unknown"], "usage_error", 2),
     Case("missing-command", ["--json"], "usage_error", 2),
     Case("retries-invalid", ["--json", "--retries", "-1", "models"], "usage_error", 2),

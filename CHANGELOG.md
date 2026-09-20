@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.0
+
+- Offline signed inference receipt verification: `trustedrouter.receipts.verify_receipt()`
+  accepts a compact or flattened JWS and fails closed with typed errors —
+  structure (duplicate JSON keys rejected), header, Ed25519 signature,
+  `rv`/`iat` (60 s future skew, optional max age), nonce, tee-verified
+  claims, and both captured-stream hash domains. `ReceiptCapture` preserves
+  exact wire bytes from a streaming response. GCP attestation chains verify
+  through the package's existing verifier with the receipt-key commitment
+  checked by set membership; `aws-nitro-cose` and `azure-maa-jwt` raise
+  `UnsupportedAttestationError` rather than skipping. The enclave-generated
+  parity fixtures are byte-identical across all six SDKs.
+- Receipt-key attestation binding mode: compact receipts verify fully when
+  the caller supplies the attestation document pinned by `att_sha256`
+  (`verify_receipt(attestation=...)`); the live-gateway path and its
+  TLS-channel requirements are unchanged.
+- **Receipt verification fails closed by default**: request and response
+  bindings are required unless explicitly disabled, `expected_issuer` is
+  required and compared as a canonical origin, and the receipt's `iss` is
+  never followed.
+- Boundary audit: every value that enters from the wire, storage, argv, or
+  env is checked before use, so malformed responses raise the SDK's typed
+  protocol error instead of `AttributeError`/`KeyError`. The `/auth/keys`
+  exchange requires only `key` (a string) and passes every unknown field
+  through; the old coercion that turned a missing key into an empty string
+  is gone. `/auth/userinfo` requires `data` to be an object and accepts the
+  legacy `{"sub": null, "workspace_id": ...}` shape. Header lookups and
+  merges are case-insensitive everywhere.
+- Packaging: the sdist ships only the library (no tests, fixtures, scripts,
+  or CI files); complete metadata (license files, keywords, per-version
+  classifiers, documentation and issue URLs). Every README example executes
+  in the test suite and the CLI is covered against the installed wheel.
+- Internal: mypy strict on the package, expanded ruff rules, a shared
+  cross-SDK auth wire fixture, and a fails-without-fix mutation gate in CI.
+
 ## 0.7.0
 
 - Promoted the bundled `trustedrouter` command from a gateway sniff-test helper
