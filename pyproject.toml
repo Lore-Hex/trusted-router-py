@@ -5,15 +5,21 @@ description = "Official Python SDK and CLI for TrustedRouter."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["trustedrouter", "llm", "sdk", "attestation", "openai"]
 authors = [{ name = "Lore Hex" }]
 dependencies = ["httpx>=0.27.0", "pydantic>=2.6"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
 
@@ -23,6 +29,8 @@ receipts = ["cryptography"]
 
 [project.urls]
 Homepage = "https://trustedrouter.com"
+Documentation = "https://github.com/Lore-Hex/trusted-router-py#readme"
+Issues = "https://github.com/Lore-Hex/trusted-router-py/issues"
 Repository = "https://github.com/Lore-Hex/trusted-router-py"
 Trust = "https://trust.trustedrouter.com"
 
@@ -35,6 +43,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trustedrouter"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/trustedrouter"]
 
 [dependency-groups]
 dev = [

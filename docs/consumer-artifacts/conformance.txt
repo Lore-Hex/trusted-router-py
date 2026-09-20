@@ -1,0 +1,27 @@
+PASS  python      success                              940 ms
+PASS  python      retry-503                            931 ms
+PASS  python      verdict-false                        855 ms
+PASS  python      verdict-true                         855 ms
+PASS  python      retry-exhausted                     1630 ms
+PASS  python      transport-disconnect                1273 ms
+PASS  python      telemetry-retry                      968 ms
+PASS  python      reserved-header-opt-out              853 ms
+PASS  python      retry-500                           1153 ms
+PASS  python      retry-429                           1200 ms
+PASS  python      terminal-401                         845 ms
+PASS  python      sse-truncated                       1080 ms
+PASS  python      sse-malformed                        834 ms
+PASS  python      cross-origin-redirect                857 ms
+PASS  python      generated-idempotency               1264 ms
+PASS  python      generated-idempotency-disconnect    1274 ms
+PASS  python      unsafe-post-disconnect              1007 ms
+PASS  python      body-timeout                         809 ms
+PASS  python      caller-cancellation                 2330 ms
+PASS  python      oauth-no-credentials                 868 ms
+PASS  python      oauth-cross-origin-redirect          982 ms
+PASS  python      chat-model-preservation              887 ms
+PASS  python      responses-model-preservation         915 ms
+PASS  python      retry-truncated-error               1092 ms
+PASS  python      retry-stalled-error-body            1978 ms
+
+25 checks: 25 passed, 0 failed, 0 skipped

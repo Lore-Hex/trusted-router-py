@@ -224,13 +224,18 @@ Every HTTP failure raises a typed subclass of `TrustedRouterError` so callers
 can discriminate without inspecting status codes:
 
 ```python
+import logging
+import time
+
+log = logging.getLogger(__name__)
+
 from trustedrouter import (
     TrustedRouter, AuthenticationError, RateLimitError,
     BadRequestError, EndpointNotSupportedError, NotFoundError, InternalError,
 )
 
 try:
-    client.chat_completions(messages=[...])
+    client.chat_completions(messages=[{"role": "user", "content": "hello"}])
 except RateLimitError as e:
     time.sleep(e.retry_after or 5)        # honors Retry-After header
 except AuthenticationError:
@@ -352,29 +357,16 @@ the TLS leaf cert SHA-256. Verifying it proves the prompt path you're about
 to use is the exact build the trust page advertises:
 
 ```python
-import secrets, ssl, socket
 from trustedrouter import TrustedRouter
 from trustedrouter.attestation import (
     verify_gateway_attestation, policy_from_trust_release,
 )
 
-# Pull the published image digest/reference from the trust page
-policy = policy_from_trust_release()                 # or pin one explicitly
-
+# Verify the signed workload identity against the published release.
+policy = policy_from_trust_release()
 with TrustedRouter(api_key="sk-tr-v1-...") as client:
-    nonce = secrets.token_hex(16)
-    jwt = client.attestation()                       # raw JWT bytes
-
-    # Bind the JWT to the live TLS connection's cert
-    with ssl.create_default_context().wrap_socket(
-        socket.create_connection(("api.trustedrouter.com", 443)),
-        server_hostname="api.trustedrouter.com",
-    ) as s:
-        cert_der = s.getpeercert(binary_form=True)
-
-    attestation = verify_gateway_attestation(
-        jwt, policy=policy, nonce_hex=nonce, tls_cert_der=cert_der
-    )
+    jwt = client.attestation()
+    attestation = verify_gateway_attestation(jwt, policy=policy)
     print("verified gateway:", attestation.image_digest)
 ```
 
@@ -382,6 +374,11 @@ with TrustedRouter(api_key="sk-tr-v1-...") as client:
 of: bad signature, expired JWT, wrong issuer, audience mismatch,
 image_digest mismatch, image_reference mismatch, missing nonce echo, or
 TLS cert mismatch. Never returns falsey for a failed verification.
+
+This example verifies signed workload identity. To prove a live TLS exporter
+and a same-socket follow-up challenge, use `verify_gateway_session()` or
+`trustedrouter attest --session`; a certificate from a separate connection
+does not establish that binding.
 
 This codepath needs `cryptography`; install with
 `pip install trusted-router-py[attestation]`.
@@ -479,7 +476,7 @@ Pass global `--json` before or after a subcommand. Non-streaming successes emit
 one compact JSON object on stdout:
 
 ```json
-{"command":"chat","data":{"id":"...","choices":[...]},"ok":true}
+{"command":"chat","data":{"id":"chatcmpl-example","choices":[]},"ok":true}
 ```
 
 Errors emit one compact object on stderr and never mix in usage text:
@@ -535,7 +532,7 @@ client.messages(            # Anthropic-shape, preserves system + content blocks
     messages=[{"role": "user", "content": "hi"}],
     max_tokens=512,
 )
-client.billing_checkout(amount=25, payment_method="stablecoin", idempotency_key=...)
+client.billing_checkout(amount=25, payment_method="stablecoin", idempotency_key="checkout-order-123")
 ```
 
 These catalog, account, billing, and broadcast helpers are control-plane calls
@@ -569,9 +566,13 @@ client.request("GET", "/some/new/route", headers={"x-trace": "abc"})
 ```bash
 uv sync --group dev
 uv run ruff check .
-uv run pytest                              # ~110 tests, ≥85% coverage gate
+uv run python scripts/boundary_check.py
+uv run mypy
+uv run pytest                              # branch-inclusive coverage ≥87%
+uv run python scripts/mutation_check.py
+uv run python scripts/consumer_mutation_check.py
 ```
 
-CI runs lint + tests on every push to main and PR. Coverage gate is
-enforced — PRs that drop coverage below 85% fail. Add tests with new
+CI runs lint, static checks, tests, and mutation gates on every push to main
+and PR. The coverage gate is enforced at 87%. Add tests with new
 public surface.
