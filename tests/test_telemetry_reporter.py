@@ -548,3 +548,15 @@ def test_sdk_identity_uses_only_the_contract_vocabulary() -> None:
     assert set(TELEMETRY_HOSTS) >= {"apex", "custom"}
     assert set(TELEMETRY_FINAL_OUTCOMES) >= {"ok", "exhausted"}
     assert set(TELEMETRY_TIMEOUT_PHASES) >= {"none", "idle"}
+
+
+def test_policy_does_not_swallow_programming_errors(reporter_factory, monkeypatch, caplog) -> None:
+    reporter = reporter_factory()
+    reporter._apply_policy_locked(httpx.Response(202, content=b"{broken"), 0)
+
+    def broken(self):
+        raise RuntimeError("decoder bug")
+
+    monkeypatch.setattr(httpx.Response, "json", broken)
+    with pytest.raises(RuntimeError, match="decoder bug"):
+        reporter._apply_policy_locked(httpx.Response(202), 0)

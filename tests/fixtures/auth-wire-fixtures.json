@@ -1,0 +1,62 @@
+{
+  "$comment": "Literal control-plane auth payloads, copied from the producers: quill-router routes/oauth_keys.py, routes/auth.py, verification.py, and the SDK conformance harness scenario oauth-no-credentials. Every SDK carries this file byte-identically. A guard may require only the fields the SDK consumes; everything else passes through.",
+  "exchange": {
+    "consumed_fields": ["key"],
+    "accept": {
+      "conformance_minimal": {"key": "tr-delegated-conformance", "user_id": "user-conformance"},
+      "control_plane_full": {
+        "key": "sk-tr-v1-delegated",
+        "user_id": "user_01HZX",
+        "identity": {
+          "sub": "user_01HZX",
+          "email": "person@example.com",
+          "email_verified": true,
+          "phone_verified": false,
+          "identity_verified": true,
+          "verification_level": "identity",
+          "wallet_address": null,
+          "workspace_id": "ws_01HZX",
+          "created_at": "2026-08-27T00:00:00Z"
+        },
+        "data": {"id": "key_01", "name": "Lore Web", "limit": null, "usage": 0}
+      },
+      "control_plane_identity_null": {"key": "sk-tr-v1-delegated", "user_id": "user_01HZX", "identity": null, "data": {}},
+      "unknown_extra_fields_pass_through": {"key": "sk-tr-v1-delegated", "user_id": "user_01HZX", "future_field": {"nested": [1, 2, 3]}}
+    },
+    "reject": {
+      "missing_key": {},
+      "key_not_string": {"key": 7},
+      "key_null": {"key": null, "user_id": "u"},
+      "identity_not_record": {"key": "k", "identity": []},
+      "identity_sub_not_string": {"key": "k", "identity": {"sub": 7}},
+      "data_not_record": {"key": "k", "data": []},
+      "body_not_object": ["k"]
+    }
+  },
+  "userinfo": {
+    "consumed_fields": ["data"],
+    "accept": {
+      "control_plane_full": {
+        "data": {
+          "sub": "user_01HZX",
+          "email": "person@example.com",
+          "email_verified": true,
+          "phone_verified": false,
+          "identity_verified": true,
+          "verification_level": "identity",
+          "wallet_address": null,
+          "workspace_id": "ws_01HZX",
+          "created_at": "2026-08-27T00:00:00Z"
+        }
+      },
+      "legacy_ownerless_key": {"data": {"sub": null, "workspace_id": "ws_01HZX"}}
+    },
+    "reject": {
+      "missing_data": {},
+      "data_not_record": {"data": []},
+      "data_null": {"data": null},
+      "sub_not_string": {"data": {"sub": 7}},
+      "email_not_string": {"data": {"sub": "u", "email": 7}}
+    }
+  }
+}

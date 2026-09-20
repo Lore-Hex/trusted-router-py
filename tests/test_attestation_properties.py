@@ -182,8 +182,8 @@ def test_release_with_only_empty_lists_is_refused() -> None:
 
 
 def test_release_whose_accepted_lists_hold_no_strings_is_refused() -> None:
-    """The list filter drops non-strings, which can empty a non-empty list."""
-    with pytest.raises(AttestationVerificationError, match="pins no image identity"):
+    """Malformed trust material is rejected before any pin can be discarded."""
+    with pytest.raises(AttestationVerificationError, match="string array"):
         policy_from_trust_release(release={"accepted_image_digests": [None, 7, ""]})
 
 

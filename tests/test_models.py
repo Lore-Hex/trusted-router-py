@@ -3,6 +3,8 @@ the client. Keeps the model layer testable in isolation."""
 
 from __future__ import annotations
 
+import pytest
+
 from trustedrouter.models import (
     ChatChoice,
     ChatChoiceDelta,
@@ -197,3 +199,18 @@ def test_chat_choice_message_required_role_and_content() -> None:
     )
     assert cc.index == 0  # default
     assert cc.message.role == "assistant"
+
+
+@pytest.mark.parametrize("field", ["open_weights", "us_provider_available",
+                                   "eu_focused_provider_available"])
+def test_catalog_boolean_metadata(field) -> None:
+    from trustedrouter import InternalError
+    from trustedrouter.models import ModelInfo
+
+    values: list[object] = ["false", 0, [], None]
+    for value in values:
+        model = ModelInfo(id="m", trustedrouter={field: value, "future": []})
+        with pytest.raises(InternalError):
+            getattr(model, field)
+    assert getattr(ModelInfo(id="m", trustedrouter={field: False}), field) is False
+    assert getattr(ModelInfo(id="m", trustedrouter={field: True}), field) is True

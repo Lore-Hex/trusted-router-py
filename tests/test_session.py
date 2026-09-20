@@ -613,7 +613,7 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
             try:
                 for raw in server_sockets:
                     serve_connection(raw)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 -- Relay thread failures to test assertions.
                 server_errors.append(exc)
 
         thread = threading.Thread(target=socketpair_loop, daemon=True)
@@ -660,3 +660,13 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
     assert not thread.is_alive()
     if server_errors:
         raise server_errors[0]
+
+
+def test_recv_requires_bytes(monkeypatch) -> None:
+    import time
+
+    from trustedrouter.attestation import AttestationVerificationError
+
+    monkeypatch.setattr(tr_session, "_ssl_call", lambda *args, **kwargs: "wrong")
+    with socket.socket() as raw, pytest.raises(AttestationVerificationError, match="bytes"):
+        tr_session._recv_or_fail(None, raw, "test", deadline=time.monotonic() + 5)

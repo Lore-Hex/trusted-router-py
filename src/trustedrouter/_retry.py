@@ -68,6 +68,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from trustedrouter._headers import _header
+
 
 def _should_retry_header(headers: Mapping[str, str]) -> bool | None:
     """The gateway's explicit verdict, which overrides everything below.
@@ -80,7 +82,7 @@ def _should_retry_header(headers: Mapping[str, str]) -> bool | None:
     Same header OpenAI's clients honor. `None` means the server did not say,
     and the status heuristics below apply.
     """
-    raw = headers.get("x-should-retry") or headers.get("X-Should-Retry")
+    raw = _header(headers, "x-should-retry")
     if raw is None:
         return None
     value = raw.strip().lower()
@@ -164,7 +166,7 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     """
     # retry-after-ms wins when both are present: it is the more precise of the
     # two, and a server that bothers to send it means the sub-second value.
-    raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
+    raw_ms = _header(headers, "retry-after-ms")
     if raw_ms:
         try:
             millis = float(raw_ms.strip())
@@ -173,7 +175,7 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
         bounded = _bounded_retry_after(millis / 1000.0) if math.isfinite(millis) else None
         if bounded is not None:
             return bounded
-    raw = headers.get("retry-after") or headers.get("Retry-After")
+    raw = _header(headers, "retry-after")
     if not raw:
         return None
     try:

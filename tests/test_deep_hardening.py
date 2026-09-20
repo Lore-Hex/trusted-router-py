@@ -253,3 +253,121 @@ def test_oauth_exchange_terminal_scrub_is_scoped_and_installed_once_async() -> N
         ("/unmarked", sensitive_names),
         ("/v1/auth/keys", set()),
     ]
+
+
+def test_successful_malformed_json_is_typed() -> None:
+    from trustedrouter._errors import _json_or_raise
+
+    with pytest.raises(InternalError, match="Malformed JSON"):
+        _json_or_raise(httpx.Response(200, content=b"{broken"))
+
+
+@pytest.mark.parametrize("choices", [None, 7, {}, "text", [None], [[]], [{"delta": []}],
+                                     [{"delta": None}], [{"delta": 7}]])
+def test_text_delta_shapes(choices) -> None:
+    from trustedrouter._sse import _delta_text
+
+    with pytest.raises(InternalError):
+        _delta_text({"choices": choices})
+    assert _delta_text({"choices": [{"delta": {"content": "ok", "future": []}}]}) == "ok"
+
+
+@pytest.mark.parametrize("choices", [None, 7, {}, "text", [None], [[]], [{"delta": []}],
+                                     [{"delta": None}], [{"delta": 7}]])
+def test_collector_shapes(choices) -> None:
+    # A good neighboring choice must not hide the malformed one.
+    with pytest.raises(InternalError):
+        _collect_completion([{"choices": [{"delta": {"content": "ok"}}]}, {"choices": choices}])
+
+
+@pytest.mark.parametrize("delta", [
+    {"tool_calls": 7}, {"tool_calls": [None]}, {"tool_calls": [{"function": []}]},
+    {"tool_calls": [{"function": {"arguments": 7}}]},
+    {"function_call": []}, {"function_call": {"arguments": 7}},
+])
+def test_collector_tool_shapes(delta) -> None:
+    with pytest.raises(InternalError):
+        _collect_completion([{"choices": [{"delta": delta}]}])
+
+
+@pytest.mark.parametrize("value", [[], "x", 7, False])
+def test_stream_options_shape(value) -> None:
+    from trustedrouter._collect import _with_usage
+
+    with pytest.raises(InternalError):
+        _with_usage({"stream_options": value})
+
+
+def test_retry_headers_any_case() -> None:
+    from trustedrouter._retry import _retry_after_seconds, _should_retry_header
+
+    assert _should_retry_header({"X-SHOULD-RETRY": "false"}) is False
+    assert _retry_after_seconds({"RETRY-AFTER": "2"}) == 2
+    assert _retry_after_seconds({"RETRY-AFTER-MS": "1250"}) == 1.25
+
+
+def _assert_boundary_headers(request: httpx.Request) -> httpx.Response:
+    assert request.headers.get_list("authorization") == ["Bearer key"]
+    assert request.headers.get_list("x-repeat") == ["a", "b"]
+    assert request.headers.get_list("user-agent") == ["custom"]
+    if request.headers.get("accept") == "text/event-stream":
+        return _sse('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+    return httpx.Response(200, json={"data": []})
+
+
+def test_header_merges_sync() -> None:
+    headers = httpx.Headers([
+        ("X-Repeat", "a"), ("x-repeat", "b"), ("User-Agent", "custom"),
+        ("Authorization", "stale"),
+    ])
+    with httpx.Client(transport=httpx.MockTransport(_assert_boundary_headers)) as client:
+        sdk = TrustedRouter(api_key="key", client=client, headers=headers,
+                            base_url="https://example.test/v1", telemetry=False)
+        sdk.models()
+        assert list(sdk.chat_completions_stream(model="m", messages=[])) == ["ok"]
+        sdk.request("GET", "/models", headers={"AUTHORIZATION": "stale2"})
+        assert headers.get_list("x-repeat") == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_header_merges_async() -> None:
+    from trustedrouter import AsyncTrustedRouter
+
+    headers = httpx.Headers([
+        ("X-Repeat", "a"), ("x-repeat", "b"), ("User-Agent", "custom"),
+        ("Authorization", "stale"),
+    ])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_assert_boundary_headers)) as client:
+        sdk = AsyncTrustedRouter(api_key="key", client=client, headers=headers,
+                                 base_url="https://example.test/v1", telemetry=False)
+        await sdk.models()
+        stream = sdk.chat_completions_stream(model="m", messages=[])
+        assert [text async for text in stream] == ["ok"]
+        await sdk.request("GET", "/models", headers={"AUTHORIZATION": "stale2"})
+        assert headers.get_list("x-repeat") == ["a", "b"]
+
+
+def test_stream_header_assembly() -> None:
+    from trustedrouter._requests import _build_stream_request
+
+    request = _build_stream_request(
+        "POST", "https://example.test", body={}, api_key="key",
+        extra_headers=httpx.Headers([("Authorization", "stale"), ("x", "a"), ("x", "b")]),
+    )
+    assert request["headers"].get_list("authorization") == ["Bearer key"]
+    assert request["headers"].get_list("x") == ["a", "b"]
+
+
+@pytest.mark.parametrize("helper", ["user_agent", "sdk_identity"])
+def test_metadata_fallback_is_narrow(helper, monkeypatch) -> None:
+    import importlib.metadata
+
+    from trustedrouter._requests import _user_agent
+    from trustedrouter._telemetry import sdk_identity
+
+    def broken(_name):
+        raise RuntimeError("metadata bug")
+
+    monkeypatch.setattr(importlib.metadata, "version", broken)
+    with pytest.raises(RuntimeError, match="metadata bug"):
+        (_user_agent if helper == "user_agent" else sdk_identity)()

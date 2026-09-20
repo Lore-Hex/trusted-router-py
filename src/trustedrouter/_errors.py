@@ -120,7 +120,7 @@ def _stream_protocol_error(message: str, *, payload: Any | None = None) -> Inter
 def _json_or_raise(response: httpx.Response) -> dict[str, Any]:
     retry_after = _retry_after_seconds(response.headers)
     try:
-        payload = response.json()
+        payload: object = response.json()
     except ValueError as exc:
         if not response.is_success:
             raise _classify_error(
@@ -129,7 +129,7 @@ def _json_or_raise(response: httpx.Response) -> dict[str, Any]:
                 payload=None,
                 retry_after=retry_after,
             ) from exc
-        raise
+        raise _stream_protocol_error("Malformed JSON in TrustedRouter response") from exc
     if not response.is_success:
         message = _error_message(payload)
         raise _classify_error(

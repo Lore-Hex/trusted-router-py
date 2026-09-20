@@ -39,7 +39,7 @@ from typing import Any
 import httpx
 
 from trustedrouter._constants import DEFAULT_CONTROL_BASE_URL
-from trustedrouter._errors import _json_or_raise
+from trustedrouter._errors import _json_or_raise, _stream_protocol_error
 from trustedrouter._requests import (
     _DEFAULT_USER_AGENT,
     _acredential_free_request,
@@ -238,18 +238,33 @@ def _exchange_body(
 
 
 def _token_from_payload(payload: dict[str, Any]) -> OAuthToken:
+    key = payload.get("key")
+    if not isinstance(key, str):
+        raise _stream_protocol_error("OAuth exchange key must be a string", payload=payload)
+    user_id = payload.get("user_id")
+    if user_id is not None and not isinstance(user_id, str):
+        raise _stream_protocol_error("OAuth user_id must be a string or null", payload=payload)
     identity = payload.get("identity")
-    return OAuthToken(
-        key=str(payload.get("key") or ""),
-        user_id=(str(payload["user_id"]) if payload.get("user_id") is not None else None),
-        identity=identity if isinstance(identity, dict) else None,
-        data=payload,
-    )
+    if identity is not None:
+        identity = _identity_record(identity)
+    if "data" in payload and not isinstance(payload["data"], dict):
+        raise _stream_protocol_error("OAuth exchange data must be an object", payload=payload)
+    return OAuthToken(key=key, user_id=user_id, identity=identity, data=payload)
 
 
 def _userinfo_data(payload: dict[str, Any]) -> dict[str, Any]:
-    data = payload.get("data")
-    return data if isinstance(data, dict) else payload
+    return _identity_record(payload.get("data"))
+
+
+def _identity_record(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _stream_protocol_error("OAuth identity must be an object", payload=value)
+    # Only exposed identity strings are consumed; all other metadata survives unchanged.
+    for field in ("sub", "email"):
+        member = value.get(field)
+        if member is not None and not isinstance(member, str):
+            raise _stream_protocol_error(f"OAuth {field} must be a string or null", payload=value)
+    return value
 
 
 # ---- key exchange ---------------------------------------------------------

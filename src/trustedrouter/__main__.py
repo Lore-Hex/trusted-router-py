@@ -20,7 +20,7 @@ import argparse
 import json
 import os
 import re
-import sys
+import sys as sys
 from contextlib import suppress
 from typing import Any, NoReturn, TextIO
 
@@ -223,11 +223,12 @@ def _stdin_prompt() -> str:
             if byte_count > MAX_STDIN_PROMPT_BYTES:
                 raise _CLIInputError("stdin prompt exceeds 8 MiB limit")
             text_chunks.append(chunk)
-        return "".join(text_chunks)
     except UnicodeError as exc:
         raise _CLIInputError("stdin prompt must be valid UTF-8") from exc
     except OSError as exc:
         raise _CLIInputError("prompt is required (pass text or pipe stdin)") from exc
+    else:
+        return "".join(text_chunks)
 
 
 def _prompt_from_args(args: argparse.Namespace) -> str:
@@ -317,7 +318,6 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             _emit_success("chat", resp)
         else:
             print(resp.choices[0].message.content or "")
-        return EXIT_SUCCESS
     except (AuthenticationError, PermissionDeniedError) as exc:
         return _emit_error(
             args,
@@ -342,13 +342,15 @@ def _cmd_chat(args: argparse.Namespace) -> int:
             exit_code=EXIT_RUNTIME,
             plain_message=f"error: HTTP {exc.status_code}: {exc}",
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary emits a nonzero error envelope for arbitrary command failures.
         return _emit_error(
             args,
             error_type="runtime_error",
             message=str(exc),
             exit_code=EXIT_RUNTIME,
         )
+    else:
+        return EXIT_SUCCESS
     finally:
         if client is not None:
             with suppress(Exception):
@@ -372,7 +374,6 @@ def _cmd_list(path: str, args: argparse.Namespace) -> int:
             _emit_success(path, result)
         else:
             _print(result)
-        return EXIT_SUCCESS
     except (AuthenticationError, PermissionDeniedError) as exc:
         return _emit_error(
             args,
@@ -393,13 +394,15 @@ def _cmd_list(path: str, args: argparse.Namespace) -> int:
             exit_code=EXIT_RUNTIME,
             plain_message=f"error: HTTP {exc.status_code}: {exc}",
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary emits a nonzero error envelope for arbitrary command failures.
         return _emit_error(
             args,
             error_type="runtime_error",
             message=str(exc),
             exit_code=EXIT_RUNTIME,
         )
+    else:
+        return EXIT_SUCCESS
     finally:
         if client is not None:
             with suppress(Exception):
@@ -413,7 +416,6 @@ def _cmd_trust(args: argparse.Namespace) -> int:
             _emit_success("trust", result)
         else:
             _print(result)
-        return EXIT_SUCCESS
     except (AuthenticationError, PermissionDeniedError) as exc:
         return _emit_error(
             args,
@@ -434,13 +436,15 @@ def _cmd_trust(args: argparse.Namespace) -> int:
             exit_code=EXIT_RUNTIME,
             plain_message=f"error: HTTP {exc.status_code}: {exc}",
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary emits a nonzero error envelope for arbitrary command failures.
         return _emit_error(
             args,
             error_type="runtime_error",
             message=str(exc),
             exit_code=EXIT_RUNTIME,
         )
+    else:
+        return EXIT_SUCCESS
 
 
 def _cmd_attest(args: argparse.Namespace) -> int:
@@ -499,7 +503,6 @@ def _cmd_attest(args: argparse.Namespace) -> int:
             _emit_success("attest.verify", verification_result.as_dict())
         else:
             _print(verification_result.as_dict())
-        return EXIT_SUCCESS
     except (AuthenticationError, PermissionDeniedError) as exc:
         return _emit_error(
             args,
@@ -520,13 +523,15 @@ def _cmd_attest(args: argparse.Namespace) -> int:
             exit_code=EXIT_RUNTIME,
             plain_message=f"error: HTTP {exc.status_code}: {exc}",
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary emits a nonzero error envelope for arbitrary command failures.
         return _emit_error(
             args,
             error_type="runtime_error",
             message=str(exc),
             exit_code=EXIT_RUNTIME,
         )
+    else:
+        return EXIT_SUCCESS
     finally:
         if session is not None:
             with suppress(Exception):

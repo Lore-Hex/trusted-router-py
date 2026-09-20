@@ -34,12 +34,12 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
         chunk_usage = c.get("usage")
         if isinstance(chunk_usage, dict):
             usage = chunk_usage
-        choices = c.get("choices") or []
+        choices = c.get("choices", [])
         if not isinstance(choices, list):
-            continue
+            raise _stream_protocol_error("Completion choices must be an array", payload=c)
         for ordinal, choice in enumerate(choices):
             if not isinstance(choice, Mapping):
-                continue
+                raise _stream_protocol_error("Completion choice must be an object", payload=c)
             raw_index = choice.get("index", ordinal)
             index = raw_index if isinstance(raw_index, int) else ordinal
             state = choices_by_index.setdefault(
@@ -61,7 +61,7 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
                 if key not in {"index", "delta", "finish_reason"}:
                     state["choice_extras"][key] = value
 
-            delta = choice.get("delta") or {}
+            delta = choice.get("delta", {})
             if not isinstance(delta, Mapping):
                 raise _stream_protocol_error(
                     "TrustedRouter completion choice delta must be an object",
@@ -136,11 +136,13 @@ def _collect_completion(chunks: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _merge_tool_call_deltas(tool_calls: dict[int, dict[str, Any]], value: Any) -> None:
-    if not isinstance(value, list):
+    if value is None:
         return
+    if not isinstance(value, list):
+        raise _stream_protocol_error("Tool call deltas must be an array", payload=value)
     for ordinal, tool_call in enumerate(value):
         if not isinstance(tool_call, Mapping):
-            continue
+            raise _stream_protocol_error("Tool call delta must be an object", payload=value)
         raw_index = tool_call.get("index", ordinal)
         index = raw_index if isinstance(raw_index, int) else ordinal
         slot = tool_calls.setdefault(
@@ -155,21 +157,35 @@ def _merge_tool_call_deltas(tool_calls: dict[int, dict[str, Any]], value: Any) -
             if key not in {"index", "function"}:
                 slot[key] = item
         function = tool_call.get("function")
+        if function is not None and not isinstance(function, Mapping):
+            raise _stream_protocol_error(
+                "Tool function delta must be an object", payload=value
+            )
         if isinstance(function, Mapping):
             for key, item in function.items():
-                if key == "arguments" and isinstance(item, str):
-                    slot["function"]["arguments"] += item
+                if key == "arguments":
+                    if item is not None and not isinstance(item, str):
+                        raise _stream_protocol_error(
+                            "Tool arguments must be a string", payload=value
+                        )
+                    if isinstance(item, str):
+                        slot["function"]["arguments"] += item
                 elif item is not None:
                     slot["function"][key] = item
 
 
 def _merge_function_call_delta(state: dict[str, Any], value: Any) -> None:
-    if not isinstance(value, Mapping):
+    if value is None:
         return
+    if not isinstance(value, Mapping):
+        raise _stream_protocol_error("Function call delta must be an object", payload=value)
     state["saw_function_call"] = True
     for key, item in value.items():
-        if key == "arguments" and isinstance(item, str):
-            state["function_call"]["arguments"] += item
+        if key == "arguments":
+            if item is not None and not isinstance(item, str):
+                raise _stream_protocol_error("Function arguments must be a string", payload=value)
+            if isinstance(item, str):
+                state["function_call"]["arguments"] += item
         elif item is not None:
             state["function_call"][key] = item
 
@@ -249,7 +265,10 @@ def _with_usage(params: Mapping[str, Any]) -> dict[str, Any]:
     unless ``stream_options.include_usage`` is set; default it on (callers
     can still override by passing their own ``stream_options``)."""
     merged = dict(params)
-    stream_options = dict(merged.get("stream_options") or {})
+    raw_options = merged.get("stream_options")
+    if raw_options is not None and not isinstance(raw_options, Mapping):
+        raise _stream_protocol_error("stream_options must be an object", payload=raw_options)
+    stream_options = dict(raw_options or {})
     stream_options.setdefault("include_usage", True)
     merged["stream_options"] = stream_options
     return merged

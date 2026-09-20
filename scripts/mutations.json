@@ -1,0 +1,521 @@
+[
+  {
+    "name": "oauth-exchange",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "    key = payload.get(\"key\")\n    if not isinstance(key, str):\n        raise _stream_protocol_error(\"OAuth exchange key must be a string\", payload=payload)\n    user_id = payload.get(\"user_id\")\n    if user_id is not None and not isinstance(user_id, str):\n        raise _stream_protocol_error(\"OAuth user_id must be a string or null\", payload=payload)\n    identity = payload.get(\"identity\")\n    if identity is not None:\n        identity = _identity_record(identity)\n    if \"data\" in payload and not isinstance(payload[\"data\"], dict):\n        raise _stream_protocol_error(\"OAuth exchange data must be an object\", payload=payload)\n    return OAuthToken(key=key, user_id=user_id, identity=identity, data=payload)",
+    "after": "    identity = payload.get(\"identity\")\n    return OAuthToken(\n        key=str(payload.get(\"key\") or \"\"),\n        user_id=(str(payload[\"user_id\"]) if payload.get(\"user_id\") is not None else None),\n        identity=identity if isinstance(identity, dict) else None,\n        data=payload,\n    )",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "oauth-userinfo",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "    return _identity_record(payload.get(\"data\"))\n\n\ndef _identity_record(value: object) -> dict[str, Any]:\n    if not isinstance(value, dict):\n        raise _stream_protocol_error(\"OAuth identity must be an object\", payload=value)\n    # Only exposed identity strings are consumed; all other metadata survives unchanged.\n    for field in (\"sub\", \"email\"):\n        member = value.get(field)\n        if member is not None and not isinstance(member, str):\n            raise _stream_protocol_error(f\"OAuth {field} must be a string or null\", payload=value)\n    return value",
+    "after": "    data = payload.get(\"data\")\n    return data if isinstance(data, dict) else payload",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "json-error",
+    "file": "src/trustedrouter/_errors.py",
+    "before": "        raise _stream_protocol_error(\"Malformed JSON in TrustedRouter response\") from exc\n    if not response.is_success:",
+    "after": "        raise\n    if not response.is_success:",
+    "test": "tests/test_deep_hardening.py::test_successful_malformed_json_is_typed"
+  },
+  {
+    "name": "text-delta",
+    "file": "src/trustedrouter/_sse.py",
+    "before": "    choices = chunk.get(\"choices\", [])\n    if not isinstance(choices, list):\n        raise _stream_protocol_error(\"Completion choices must be an array\", payload=chunk)\n    if not choices:\n        return \"\"\n    first = choices[0]\n    if not isinstance(first, Mapping):\n        raise _stream_protocol_error(\"Completion choice must be an object\", payload=chunk)\n    delta = first.get(\"delta\", {})\n    if not isinstance(delta, Mapping):\n        raise _stream_protocol_error(\"Completion delta must be an object\", payload=chunk)\n    content = delta.get(\"content\")",
+    "after": "    choices = chunk.get(\"choices\") or []\n    if not choices:\n        return \"\"\n    delta = choices[0].get(\"delta\") or {}\n    content = delta.get(\"content\")",
+    "test": "tests/test_deep_hardening.py::test_text_delta_shapes"
+  },
+  {
+    "name": "collector-choices",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "        choices = c.get(\"choices\", [])\n        if not isinstance(choices, list):\n            raise _stream_protocol_error(\"Completion choices must be an array\", payload=c)\n        for ordinal, choice in enumerate(choices):\n            if not isinstance(choice, Mapping):\n                raise _stream_protocol_error(\"Completion choice must be an object\", payload=c)",
+    "after": "        choices = c.get(\"choices\") or []\n        if not isinstance(choices, list):\n            continue\n        for ordinal, choice in enumerate(choices):\n            if not isinstance(choice, Mapping):\n                continue",
+    "test": "tests/test_deep_hardening.py::test_collector_shapes"
+  },
+  {
+    "name": "collector-delta",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "            delta = choice.get(\"delta\", {})",
+    "after": "            delta = choice.get(\"delta\") or {}",
+    "test": "tests/test_deep_hardening.py::test_collector_shapes"
+  },
+  {
+    "name": "collector-tools",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "    if value is None:\n        return\n    if not isinstance(value, list):\n        raise _stream_protocol_error(\"Tool call deltas must be an array\", payload=value)\n    for ordinal, tool_call in enumerate(value):\n        if not isinstance(tool_call, Mapping):\n            raise _stream_protocol_error(\"Tool call delta must be an object\", payload=value)",
+    "after": "    if not isinstance(value, list):\n        return\n    for ordinal, tool_call in enumerate(value):\n        if not isinstance(tool_call, Mapping):\n            continue",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "collector-tool-function",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "        function = tool_call.get(\"function\")\n        if function is not None and not isinstance(function, Mapping):\n            raise _stream_protocol_error(\n                \"Tool function delta must be an object\", payload=value\n            )\n        if isinstance(function, Mapping):",
+    "after": "        function = tool_call.get(\"function\")\n        if isinstance(function, Mapping):",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "collector-tool-arguments",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "                if key == \"arguments\":\n                    if item is not None and not isinstance(item, str):\n                        raise _stream_protocol_error(\n                            \"Tool arguments must be a string\", payload=value\n                        )\n                    if isinstance(item, str):\n                        slot[\"function\"][\"arguments\"] += item",
+    "after": "                if key == \"arguments\" and isinstance(item, str):\n                    slot[\"function\"][\"arguments\"] += item",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "collector-function",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "    if value is None:\n        return\n    if not isinstance(value, Mapping):\n        raise _stream_protocol_error(\"Function call delta must be an object\", payload=value)\n    state[\"saw_function_call\"] = True",
+    "after": "    if not isinstance(value, Mapping):\n        return\n    state[\"saw_function_call\"] = True",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "collector-function-arguments",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "        if key == \"arguments\":\n            if item is not None and not isinstance(item, str):\n                raise _stream_protocol_error(\"Function arguments must be a string\", payload=value)\n            if isinstance(item, str):\n                state[\"function_call\"][\"arguments\"] += item",
+    "after": "        if key == \"arguments\" and isinstance(item, str):\n            state[\"function_call\"][\"arguments\"] += item",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "stream-options",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "    raw_options = merged.get(\"stream_options\")\n    if raw_options is not None and not isinstance(raw_options, Mapping):\n        raise _stream_protocol_error(\"stream_options must be an object\", payload=raw_options)\n    stream_options = dict(raw_options or {})",
+    "after": "    stream_options = dict(merged.get(\"stream_options\") or {})",
+    "test": "tests/test_deep_hardening.py::test_stream_options_shape"
+  },
+  {
+    "name": "_client_sync.py-default-headers",
+    "file": "src/trustedrouter/_client_sync.py",
+    "before": "default_headers = httpx.Headers({\"user-agent\": _DEFAULT_USER_AGENT})",
+    "after": "default_headers = {\"user-agent\": _DEFAULT_USER_AGENT}",
+    "test": "tests/test_deep_hardening.py::test_header_merges_sync"
+  },
+  {
+    "name": "_client_sync.py-retain-headers",
+    "file": "src/trustedrouter/_client_sync.py",
+    "before": "self._default_headers = httpx.Headers(default_headers)",
+    "after": "self._default_headers = dict(default_headers)",
+    "test": "tests/test_deep_hardening.py::test_header_merges_sync"
+  },
+  {
+    "name": "_client_sync.py-request-headers",
+    "file": "src/trustedrouter/_client_sync.py",
+    "before": "merged_headers = httpx.Headers(self._default_headers)",
+    "after": "merged_headers = dict(self._default_headers)",
+    "test": "tests/test_deep_hardening.py::test_header_merges_sync"
+  },
+  {
+    "name": "_client_sync.py-stream-headers",
+    "file": "src/trustedrouter/_client_sync.py",
+    "before": "def _merged_headers(self, headers: Mapping[str, str] | None) -> httpx.Headers:\n        merged = httpx.Headers(self._default_headers)",
+    "after": "def _merged_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:\n        merged = dict(self._default_headers)",
+    "test": "tests/test_deep_hardening.py::test_header_merges_sync"
+  },
+  {
+    "name": "_client_async.py-default-headers",
+    "file": "src/trustedrouter/_client_async.py",
+    "before": "default_headers = httpx.Headers({\"user-agent\": _DEFAULT_USER_AGENT})",
+    "after": "default_headers = {\"user-agent\": _DEFAULT_USER_AGENT}",
+    "test": "tests/test_deep_hardening.py::test_header_merges_async"
+  },
+  {
+    "name": "_client_async.py-retain-headers",
+    "file": "src/trustedrouter/_client_async.py",
+    "before": "self._default_headers = httpx.Headers(default_headers)",
+    "after": "self._default_headers = dict(default_headers)",
+    "test": "tests/test_deep_hardening.py::test_header_merges_async"
+  },
+  {
+    "name": "_client_async.py-request-headers",
+    "file": "src/trustedrouter/_client_async.py",
+    "before": "merged_headers = httpx.Headers(self._default_headers)",
+    "after": "merged_headers = dict(self._default_headers)",
+    "test": "tests/test_deep_hardening.py::test_header_merges_async"
+  },
+  {
+    "name": "_client_async.py-stream-headers",
+    "file": "src/trustedrouter/_client_async.py",
+    "before": "def _merged_headers(self, headers: Mapping[str, str] | None) -> httpx.Headers:\n        merged = httpx.Headers(self._default_headers)",
+    "after": "def _merged_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:\n        merged = dict(self._default_headers)",
+    "test": "tests/test_deep_hardening.py::test_header_merges_async"
+  },
+  {
+    "name": "stream-assembly",
+    "file": "src/trustedrouter/_requests.py",
+    "before": "    headers = httpx.Headers({\n        \"accept\": \"text/event-stream\",\n        \"user-agent\": _DEFAULT_USER_AGENT,\n    })",
+    "after": "    headers: dict[str, str] = {\n        \"accept\": \"text/event-stream\",\n        \"user-agent\": _DEFAULT_USER_AGENT,\n    }",
+    "test": "tests/test_deep_hardening.py::test_stream_header_assembly"
+  },
+  {
+    "name": "retry-verdict",
+    "file": "src/trustedrouter/_retry.py",
+    "before": "raw = _header(headers, \"x-should-retry\")",
+    "after": "raw = headers.get(\"x-should-retry\") or headers.get(\"X-Should-Retry\")",
+    "test": "tests/test_deep_hardening.py::test_retry_headers_any_case"
+  },
+  {
+    "name": "retry-ms",
+    "file": "src/trustedrouter/_retry.py",
+    "before": "raw_ms = _header(headers, \"retry-after-ms\")",
+    "after": "raw_ms = headers.get(\"retry-after-ms\") or headers.get(\"Retry-After-Ms\")",
+    "test": "tests/test_deep_hardening.py::test_retry_headers_any_case"
+  },
+  {
+    "name": "retry-seconds",
+    "file": "src/trustedrouter/_retry.py",
+    "before": "raw = _header(headers, \"retry-after\")",
+    "after": "raw = headers.get(\"retry-after\") or headers.get(\"Retry-After\")",
+    "test": "tests/test_deep_hardening.py::test_retry_headers_any_case"
+  },
+  {
+    "name": "telemetry-policy-catch",
+    "file": "src/trustedrouter/_telemetry.py",
+    "before": "            payload: object = response.json()\n        except ValueError:\n            _logger.debug(\"Ignoring malformed optional telemetry policy JSON\", exc_info=True)\n            return",
+    "after": "            payload = response.json()\n        except Exception:  # noqa: BLE001\n            return",
+    "test": "tests/test_telemetry_reporter.py::test_policy_does_not_swallow_programming_errors"
+  },
+  {
+    "name": "open_weights",
+    "file": "src/trustedrouter/models.py",
+    "before": "return self._metadata_bool(\"open_weights\")",
+    "after": "return bool((self.trustedrouter or {}).get(\"open_weights\"))",
+    "test": "tests/test_models.py::test_catalog_boolean_metadata"
+  },
+  {
+    "name": "us_provider_available",
+    "file": "src/trustedrouter/models.py",
+    "before": "return self._metadata_bool(\"us_provider_available\")",
+    "after": "return bool((self.trustedrouter or {}).get(\"us_provider_available\"))",
+    "test": "tests/test_models.py::test_catalog_boolean_metadata"
+  },
+  {
+    "name": "eu_focused_provider_available",
+    "file": "src/trustedrouter/models.py",
+    "before": "return self._metadata_bool(\"eu_focused_provider_available\")",
+    "after": "return bool((self.trustedrouter or {}).get(\"eu_focused_provider_available\"))",
+    "test": "tests/test_models.py::test_catalog_boolean_metadata"
+  },
+  {
+    "name": "release-pins",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "        if not isinstance(release_obj, Mapping):\n            raise AttestationVerificationError(\"trust release must be an object\")\n        image_digest = _image_pin(release_obj, \"image_digest\")\n        accepted_image_digests = _image_pins(release_obj, \"accepted_image_digests\")\n        image_reference = _image_pin(release_obj, \"image_reference\")\n        accepted_image_references = _image_pins(release_obj, \"accepted_image_references\")",
+    "after": "        image_digest = str(release_obj.get(\"image_digest\") or \"\") or None\n        accepted_raw = release_obj.get(\"accepted_image_digests\")\n        accepted_image_digests = (\n            tuple(str(value) for value in accepted_raw if isinstance(value, str) and value)\n            if isinstance(accepted_raw, list)\n            else ()\n        )\n        image_reference = str(release_obj.get(\"image_reference\") or \"\") or None\n        accepted_references_raw = release_obj.get(\"accepted_image_references\")\n        accepted_image_references = (\n            tuple(\n                str(value) for value in accepted_references_raw if isinstance(value, str) and value\n            )\n            if isinstance(accepted_references_raw, list)\n            else ()\n        )",
+    "test": "tests/test_attestation.py::test_release_pin_shapes"
+  },
+  {
+    "name": "jwt-shapes",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    if not isinstance(header, dict) or not isinstance(payload, dict):\n        raise AttestationVerificationError(\"JWT header and claims must be objects\")\n    signing_input = f\"{h_b64}.{p_b64}\".encode(\"ascii\")\n    return header, payload, signing_input, signature",
+    "after": "    signing_input = f\"{h_b64}.{p_b64}\".encode(\"ascii\")\n    return header, payload, signing_input, signature",
+    "test": "tests/test_attestation.py::test_jwt_object_shapes"
+  },
+  {
+    "name": "jwt-encoding",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    except (ValueError, UnicodeError) as exc:\n        raise AttestationVerificationError(f\"invalid JWT encoding: {exc}\") from exc",
+    "after": "    except (json.JSONDecodeError, UnicodeDecodeError) as exc:\n        raise AttestationVerificationError(f\"invalid JWT encoding: {exc}\") from exc",
+    "test": "tests/test_attestation.py::test_jwt_non_ascii_encoding"
+  },
+  {
+    "name": "jwks-shapes",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    kid = header.get(\"kid\")\n    if not isinstance(kid, str) or not kid:\n        raise AttestationVerificationError(\"JWT kid must be a non-empty string\")\n    if not isinstance(jwks, Mapping):\n        raise AttestationVerificationError(\"JWKS must be an object\")\n    keys = jwks.get(\"keys\")\n    if not isinstance(keys, list) or any(not isinstance(key, Mapping) for key in keys):\n        raise AttestationVerificationError(\"JWKS keys must be an array of objects\")\n    matching = next((k for k in keys if k.get(\"kid\") == kid), None)",
+    "after": "    kid = header.get(\"kid\")\n    keys = jwks.get(\"keys\") or []\n    matching = next((k for k in keys if k.get(\"kid\") == kid), None)",
+    "test": "tests/test_attestation.py::test_jwks_shapes"
+  },
+  {
+    "name": "jwk-numbers",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    modulus = matching.get(\"n\")\n    exponent = matching.get(\"e\")\n    if not isinstance(modulus, str) or not isinstance(exponent, str):\n        raise AttestationVerificationError(\"JWK n and e must be strings\")\n    try:\n        n_bytes = _b64url_decode(modulus)\n        e_bytes = _b64url_decode(exponent)\n    except (ValueError, UnicodeError) as exc:\n        raise AttestationVerificationError(f\"malformed JWK: {exc}\") from exc",
+    "after": "    try:\n        n_bytes = _b64url_decode(matching[\"n\"])\n        e_bytes = _b64url_decode(matching[\"e\"])\n    except (binascii.Error, KeyError) as exc:\n        raise AttestationVerificationError(f\"malformed JWK: {exc}\") from exc",
+    "test": "tests/test_attestation.py::test_jwk_numbers"
+  },
+  {
+    "name": "rsa-numbers",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    try:\n        public_key = rsa.RSAPublicNumbers(e=e, n=n).public_key()\n    except ValueError as exc:\n        raise AttestationVerificationError(\"invalid RSA public numbers\") from exc\n    try:\n        public_key.verify",
+    "after": "    public_key = rsa.RSAPublicNumbers(e=e, n=n).public_key()\n    try:\n        public_key.verify",
+    "test": "tests/test_attestation.py::test_jwk_numbers"
+  },
+  {
+    "name": "hardware-shape",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    if claims.get(\"hwmodel\") not in (\n        \"GCP_AMD_SEV\",\n        \"GCP_AMD_SEV_ES\",\n        \"GCP_INTEL_TDX\",\n    ):",
+    "after": "    if claims.get(\"hwmodel\") not in {\n        \"GCP_AMD_SEV\",\n        \"GCP_AMD_SEV_ES\",\n        \"GCP_INTEL_TDX\",\n    }:",
+    "test": "tests/test_attestation.py::test_nested_claim_shapes"
+  },
+  {
+    "name": "container-shapes",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    submods = claims.get(\"submods\")\n    if not isinstance(submods, Mapping):\n        raise AttestationVerificationError(\"JWT submods must be an object\")\n    container = submods.get(\"container\")\n    if not isinstance(container, Mapping):\n        raise AttestationVerificationError(\"JWT container must be an object\")\n    image_digest = container.get(\"image_digest\", \"\")\n    image_reference = container.get(\"image_reference\", \"\")\n    if not isinstance(image_digest, str) or not isinstance(image_reference, str):\n        raise AttestationVerificationError(\"JWT image identity must contain strings\")",
+    "after": "    submods = (claims.get(\"submods\") or {}).get(\"container\") or {}\n    image_digest = submods.get(\"image_digest\") or \"\"\n    image_reference = submods.get(\"image_reference\") or \"\"",
+    "test": "tests/test_attestation.py::test_nested_claim_shapes"
+  },
+  {
+    "name": "nonce-shapes",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    for field in (\"eat_nonce\", \"nonces\"):\n        value = claims.get(field)\n        if value is not None and not (\n            isinstance(value, str)\n            or (isinstance(value, list) and all(isinstance(item, str) for item in value))\n        ):\n            raise AttestationVerificationError(f\"JWT {field} must be a string or string array\")\n    nonces = eat_nonces or claims.get(\"nonces\") or []\n    nonce_match: str | None = None\n    if isinstance(nonces, str):\n        nonces = [nonces]",
+    "after": "    nonces = eat_nonces or claims.get(\"nonces\") or []\n    nonce_match: str | None = None\n    if isinstance(nonces, str):\n        nonces = [nonces]",
+    "test": "tests/test_attestation.py::test_nested_claim_shapes"
+  },
+  {
+    "name": "jwks-json",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "        try:\n            data: object = response.json()\n        except ValueError as exc:\n            raise AttestationVerificationError(\"GCP JWKS returned malformed JSON\") from exc\n    if not isinstance(data, dict)",
+    "after": "        data = response.json()\n    if not isinstance(data, dict)",
+    "test": "tests/test_attestation.py::test_jwks_malformed_json"
+  },
+  {
+    "name": "receipt-kid",
+    "file": "src/trustedrouter/receipts.py",
+    "before": "    if (\n        not isinstance(kid, str)\n        or not kid.isascii()\n        or not hmac.compare_digest(kid, expected_kid)\n    ):",
+    "after": "    if not isinstance(kid, str) or not hmac.compare_digest(kid, expected_kid):",
+    "test": "tests/test_receipts.py::test_receipt_untrusted_scalar_shapes"
+  },
+  {
+    "name": "receipt-domain",
+    "file": "src/trustedrouter/receipts.py",
+    "before": "    if not isinstance(of, str) or of not in allowed:",
+    "after": "    if of not in allowed:",
+    "test": "tests/test_receipts.py::test_receipt_untrusted_scalar_shapes"
+  },
+  {
+    "name": "receipt-kind",
+    "file": "src/trustedrouter/receipts.py",
+    "before": "if kind in (\"aws-nitro-cose\", \"azure-maa-jwt\"):",
+    "after": "if kind in {\"aws-nitro-cose\", \"azure-maa-jwt\"}:",
+    "test": "tests/test_receipts.py::test_receipt_untrusted_scalar_shapes"
+  },
+  {
+    "name": "receipt-json",
+    "file": "src/trustedrouter/receipts.py",
+    "before": "    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:\n        raise ReceiptHashError(\"response stream contains malformed JSON\") from exc",
+    "after": "    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):\n        return None",
+    "test": "tests/test_receipts.py::test_embedded_receipt_malformed_json"
+  },
+  {
+    "name": "receipt-issuer",
+    "file": "src/trustedrouter/receipts.py",
+    "before": "hmac.compare_digest(canonical_issuer.encode(), canonical_expected_issuer.encode())",
+    "after": "hmac.compare_digest(canonical_issuer, canonical_expected_issuer)",
+    "test": "tests/test_receipts.py::test_unicode_issuer_is_typed"
+  },
+  {
+    "name": "tls-recv",
+    "file": "src/trustedrouter/session.py",
+    "before": "    if not isinstance(chunk, bytes):\n        raise AttestationVerificationError(\"TLS recv must return bytes\")\n    if not chunk:\n        raise EOFError(context)\n    return chunk",
+    "after": "    if not chunk:\n        raise EOFError(context)\n    return chunk",
+    "test": "tests/test_session.py::test_recv_requires_bytes"
+  },
+  {
+    "name": "transport-request-sync",
+    "file": "src/trustedrouter/_transport.py",
+    "before": "attempt_headers = httpx.Headers(kwargs.get(\"headers\") or {})",
+    "after": "attempt_headers = dict(kwargs.get(\"headers\") or {})",
+    "test": "tests/test_deep_hardening.py::test_header_merges_sync",
+    "expected_count": 2,
+    "occurrence": 0
+  },
+  {
+    "name": "transport-stream-sync",
+    "file": "src/trustedrouter/_transport.py",
+    "before": "req[\"headers\"] = httpx.Headers(req.get(\"headers\") or {})",
+    "after": "req[\"headers\"] = dict(req.get(\"headers\") or {})",
+    "test": "tests/test_deep_hardening.py::test_header_merges_sync",
+    "expected_count": 2,
+    "occurrence": 0
+  },
+  {
+    "name": "transport-request-async",
+    "file": "src/trustedrouter/_transport.py",
+    "before": "attempt_headers = httpx.Headers(kwargs.get(\"headers\") or {})",
+    "after": "attempt_headers = dict(kwargs.get(\"headers\") or {})",
+    "test": "tests/test_deep_hardening.py::test_header_merges_async",
+    "expected_count": 2,
+    "occurrence": 1
+  },
+  {
+    "name": "transport-stream-async",
+    "file": "src/trustedrouter/_transport.py",
+    "before": "req[\"headers\"] = httpx.Headers(req.get(\"headers\") or {})",
+    "after": "req[\"headers\"] = dict(req.get(\"headers\") or {})",
+    "test": "tests/test_deep_hardening.py::test_header_merges_async",
+    "expected_count": 2,
+    "occurrence": 1
+  },
+  {
+    "name": "header-helper-case",
+    "file": "src/trustedrouter/_headers.py",
+    "before": "key.lower() == name.lower()",
+    "after": "key == name",
+    "test": "tests/test_deep_hardening.py::test_retry_headers_any_case"
+  },
+  {
+    "name": "metadata-catch-_requests.py",
+    "file": "src/trustedrouter/_requests.py",
+    "before": "except PackageNotFoundError:",
+    "after": "except Exception:",
+    "test": "tests/test_deep_hardening.py::test_metadata_fallback_is_narrow"
+  },
+  {
+    "name": "metadata-catch-_telemetry.py",
+    "file": "src/trustedrouter/_telemetry.py",
+    "before": "except PackageNotFoundError:",
+    "after": "except Exception:",
+    "test": "tests/test_deep_hardening.py::test_metadata_fallback_is_narrow"
+  },
+  {
+    "name": "wire-must-not-require-data",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "if \"data\" in payload and not isinstance(payload[\"data\"], dict):",
+    "after": "if not isinstance(payload.get(\"data\"), dict):",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "oauth-guard-key",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "if not isinstance(key, str):",
+    "after": "if False:",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "oauth-guard-user-id",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "if user_id is not None and not isinstance(user_id, str):",
+    "after": "if False:",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "oauth-guard-identity-object",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "if not isinstance(value, dict):",
+    "after": "if False:",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "oauth-guard-identity-strings",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "if member is not None and not isinstance(member, str):",
+    "after": "if False:",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "trust-guard-release-object",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(release_obj, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_release_pin_shapes"
+  },
+  {
+    "name": "trust-guard-release-scalar",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if value is not None and not isinstance(value, str):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_release_pin_shapes"
+  },
+  {
+    "name": "trust-guard-release-list",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(value, list) or any(not isinstance(pin, str) or not pin for pin in value):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_release_pin_shapes"
+  },
+  {
+    "name": "trust-guard-jwks-object",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(jwks, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_jwks_shapes"
+  },
+  {
+    "name": "trust-guard-jwks-list",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(keys, list) or any(not isinstance(key, Mapping) for key in keys):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_jwks_shapes"
+  },
+  {
+    "name": "trust-guard-submods",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(submods, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_nested_claim_shapes"
+  },
+  {
+    "name": "trust-guard-container",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(container, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_nested_claim_shapes"
+  },
+  {
+    "name": "trust-guard-image-strings",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(image_digest, str) or not isinstance(image_reference, str):",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_nested_claim_shapes"
+  },
+  {
+    "name": "trust-guard-kid",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "if not isinstance(kid, str) or not kid:",
+    "after": "if False:",
+    "test": "tests/test_attestation.py::test_jwks_kid_shape"
+  },
+  {
+    "name": "oauth-data-guard",
+    "file": "src/trustedrouter/oauth.py",
+    "before": "if \"data\" in payload and not isinstance(payload[\"data\"], dict):",
+    "after": "if False:",
+    "test": "tests/test_oauth.py::test_auth_wire_fixtures"
+  },
+  {
+    "name": "text-choices-guard",
+    "file": "src/trustedrouter/_sse.py",
+    "before": "if not isinstance(choices, list):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_text_delta_shapes"
+  },
+  {
+    "name": "text-first-choice-guard",
+    "file": "src/trustedrouter/_sse.py",
+    "before": "if not isinstance(first, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_text_delta_shapes"
+  },
+  {
+    "name": "text-delta-guard",
+    "file": "src/trustedrouter/_sse.py",
+    "before": "if not isinstance(delta, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_text_delta_shapes"
+  },
+  {
+    "name": "collector-choices-guard",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "if not isinstance(choices, list):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_collector_shapes"
+  },
+  {
+    "name": "collector-choice-guard",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "if not isinstance(choice, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_collector_shapes"
+  },
+  {
+    "name": "collector-tool-array-guard",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "if not isinstance(value, list):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "collector-tool-item-guard",
+    "file": "src/trustedrouter/_collect.py",
+    "before": "if not isinstance(tool_call, Mapping):",
+    "after": "if False:",
+    "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  }
+]

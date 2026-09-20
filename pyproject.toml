@@ -52,7 +52,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-q --cov=src/trustedrouter --cov-report=term-missing --cov-report=xml --cov-fail-under=85"
+addopts = "-q --cov=src/trustedrouter --cov-report=term-missing --cov-report=xml --cov-fail-under=87"
 
 [tool.coverage.run]
 branch = true
@@ -71,11 +71,30 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "S"]
-ignore = ["S101"]
+select = ["E", "F", "I", "UP", "B", "S", "BLE001", "PGH003", "PGH004", "RUF", "TRY"]
+# Assertions document internal invariants and are used throughout tests.
+# TRY003: 197 existing contextual exception messages; moving them into exception
+# constructors would obscure diagnostics without strengthening boundary checks.
+ignore = ["S101", "TRY003"]
 
 [tool.mypy]
 python_version = "3.10"
 files = ["src/trustedrouter", "tests"]
 check_untyped_defs = true
 warn_unused_configs = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = "trustedrouter.*"
+# mypy's strict preset, expressed as per-module flags (strict itself is global).
+warn_unused_ignores = true
+warn_return_any = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
