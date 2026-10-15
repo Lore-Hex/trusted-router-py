@@ -94,7 +94,9 @@ def respond(request: httpx.Request) -> httpx.Response:
             "e": b64(numbers.e.to_bytes(3, "big")),
         }]})
     if path.endswith("/attestation"):
-        return httpx.Response(200, content=jwt().encode())
+        # The gateway echoes a caller challenge into eat_nonce.
+        nonce = request.url.params.get("nonce")
+        return httpx.Response(200, content=jwt([CERT, nonce] if nonce else None).encode())
     if path.endswith("/chat/completions"):
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=(
             b'data: {"id":"consumer","choices":[{"index":0,"delta":'

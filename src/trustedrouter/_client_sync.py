@@ -947,13 +947,18 @@ class TrustedRouter:
         response = _credential_free_request(self._client, "GET", url)
         return _json_or_raise(response)
 
-    def attestation(self) -> bytes:
+    def attestation(self, *, nonce_hex: str | None = None) -> bytes:
         """Fetch the gateway's live attestation document. Returns the raw
         JWT bytes (Confidential Space mints an OIDC JWT). Pass to
-        `trustedrouter.attestation.verify_gateway_attestation` to verify."""
+        `trustedrouter.attestation.verify_gateway_attestation` to verify.
+
+        Pass `nonce_hex` to have the gateway commit to your fresh challenge
+        in `eat_nonce` (sent as `/attestation?nonce=`);
+        `verify_gateway_attestation_document` requires one."""
         # /attestation lives at the API root, not under /v1
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
-        response = _credential_free_request(self._client, "GET", url)
+        params = None if nonce_hex is None else {"nonce": nonce_hex}
+        response = _credential_free_request(self._client, "GET", url, params=params)
         if not response.is_success:
             raise TrustedRouterError(response.status_code, response.text[:240])
         return response.content

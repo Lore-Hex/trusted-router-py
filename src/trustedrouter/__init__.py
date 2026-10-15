@@ -1,7 +1,9 @@
 from trustedrouter.attestation import (
     AttestationVerificationError,
     GatewayAttestation,
+    GatewayAttestationDocument,
     verify_gateway_attestation,
+    verify_gateway_attestation_document,
 )
 from trustedrouter.client import (
     ADVISOR_MODEL,
@@ -124,7 +126,7 @@ from trustedrouter.session import (
     verify_gateway_session,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "ADVISOR_MODEL",
@@ -173,6 +175,7 @@ __all__ = [
     "EmbeddingResponse",
     "EndpointNotSupportedError",
     "GatewayAttestation",
+    "GatewayAttestationDocument",
     "GatewaySession",
     "InternalError",
     "LogoutResponse",
@@ -239,6 +242,7 @@ __all__ = [
     "selector_tool",
     "subagent_tool",
     "verify_gateway_attestation",
+    "verify_gateway_attestation_document",
     "verify_gateway_session",
     "verify_receipt",
 ]

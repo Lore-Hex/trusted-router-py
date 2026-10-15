@@ -517,5 +517,26 @@
     "before": "if not isinstance(tool_call, Mapping):",
     "after": "if False:",
     "test": "tests/test_deep_hardening.py::test_collector_tool_shapes"
+  },
+  {
+    "name": "document-nonce-floor",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "    if not isinstance(nonce_hex, str) or _FRESH_NONCE_HEX.fullmatch(nonce_hex) is None:\n",
+    "after": "    if not isinstance(nonce_hex, str):\n",
+    "test": "tests/test_attestation_document.py::test_a_missing_or_weak_nonce_is_refused_before_any_fetch"
+  },
+  {
+    "name": "document-nonce-in-eat-nonce-only",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "        if binding_mode == \"document\":\n            # Receipt-key commitments",
+    "after": "        if False:\n            # Receipt-key commitments",
+    "test": "tests/test_attestation_document.py::test_the_nonce_must_be_in_eat_nonce_not_only_the_legacy_claim"
+  },
+  {
+    "name": "claimed-cert-is-not-a-binding",
+    "file": "src/trustedrouter/attestation.py",
+    "before": "        elif tls_cert_der is not None:\n            binding = \"tls-cert\"",
+    "after": "        else:\n            binding = \"tls-cert\"",
+    "test": "tests/test_attestation_document.py::test_a_claimed_certificate_with_no_connection_evidence_reports_none"
   }
 ]

@@ -973,9 +973,12 @@ class AsyncTrustedRouter:
         response = await _acredential_free_request(self._client, "GET", url)
         return _json_or_raise(response)
 
-    async def attestation(self) -> bytes:
+    async def attestation(self, *, nonce_hex: str | None = None) -> bytes:
+        """Async form of `TrustedRouter.attestation`; `nonce_hex` is sent as
+        `/attestation?nonce=`."""
         url = self.base_url.rsplit("/v1", 1)[0] + "/attestation"
-        response = await _acredential_free_request(self._client, "GET", url)
+        params = None if nonce_hex is None else {"nonce": nonce_hex}
+        response = await _acredential_free_request(self._client, "GET", url, params=params)
         if not response.is_success:
             raise TrustedRouterError(response.status_code, response.text[:240])
         return response.content
