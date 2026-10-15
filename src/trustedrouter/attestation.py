@@ -7,14 +7,23 @@ Confidential Space signer that commits to:
   - the workload's container image digest (sha256:...)
   - the workload's image reference (Artifact Registry path:tag)
   - a caller-supplied `nonce` (binds the doc to this exact request)
-  - the workload's TLS leaf cert SHA-256 (binds the doc to the
-    connection the client is already on)
+  - the workload's TLS leaf cert SHA-256, as one `eat_nonce` entry
+  - the TLS exporter of the session the request arrived on
 
 This module verifies the JWT signature against Google's JWKS, then
 checks each claim against an `AttestationPolicy` derived from the
-public trust release. If everything matches, the gateway is provably
-the build the trust page advertises — and any downstream chat call on
-the SAME TLS connection inherits that guarantee.
+public trust release. If everything matches, a workload running the
+exact build the trust page advertises minted the token. Whether it also
+proves *your connection* reaches that workload depends on what the
+caller can check, and every result reports that as `binding` (see
+`AttestationBinding`):
+
+  - `verify_gateway_session()` (trustedrouter.session) binds the TLS
+    exporter;
+  - `verify_gateway_attestation()` with `tls_cert_der` binds the leaf
+    cert;
+  - `verify_gateway_attestation_document()` binds nothing, for callers
+    that cannot see the TLS connection at all.
 
 The verification uses the `cryptography` library which is shipped as
 an optional extra: `pip install trusted-router-py[attestation]`. The
@@ -28,6 +37,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -48,6 +58,32 @@ GCP_JWKS_URI = (
 )
 EXPORTER_LABEL = b"EXPORTER-Channel-Binding"
 EXPORTER_LENGTH = 32
+
+# 16 bytes is the least a caller-chosen challenge should carry. The upper
+# bound only keeps input sane; the gateway enforces its own, lower, limit.
+_FRESH_NONCE_HEX = re.compile(r"(?:[0-9a-fA-F]{2}){16,64}")
+_SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
+
+AttestationBinding = Literal["none", "tls-cert", "tls-exporter"]
+"""What a verified attestation proves about the caller's connection, weakest
+first. Every check on the token itself (Google's signature, issuer, audience,
+expiry, production Confidential Space claims, image pins) passes before any of
+these is reported.
+
+``"none"``
+    Nothing ties the token to your connection. With a fresh nonce it shows a
+    workload running a pinned build answered your challenge just now; it does
+    not show that your requests reach that workload. Anything that can reach
+    the gateway (a proxy, a relay, a TLS-terminating middlebox) can obtain such
+    a token for your nonce and still serve your traffic itself.
+``"tls-cert"``
+    You supplied the DER leaf certificate of your own TLS connection, and the
+    token commits to its SHA-256. A relay that terminates TLS presents a
+    different certificate unless it holds the gateway's key.
+``"tls-exporter"``
+    The token commits to the RFC 9266 exporter of your own TLS session, so it
+    was minted inside that session.
+"""
 
 
 class AttestationVerificationError(ValueError):
@@ -92,7 +128,11 @@ class GatewayAttestation:
     """Verified attestation result. `cert_sha256` is the SHA-256 of the
     gateway's TLS leaf cert as committed by the JWT — callers can
     re-use it to pin subsequent connections without re-fetching the
-    JWT each time."""
+    JWT each time.
+
+    `binding` reports which connection evidence was compared (see
+    `AttestationBinding`). With `"none"`, `cert_sha256` is only what the
+    token claims; nothing compared it with a connection."""
 
     cert_sha256: str
     image_digest: str
@@ -102,10 +142,58 @@ class GatewayAttestation:
     issuer: str | None
     audience: str | None
     raw_claims: Mapping[str, Any]
+    binding: AttestationBinding = "none"
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "binding": self.binding,
             "cert_sha256": self.cert_sha256,
+            "image_digest": self.image_digest,
+            "image_reference": self.image_reference,
+            "nonce": self.nonce,
+            "expires_at": self.expires_at,
+            "issuer": self.issuer,
+            "audience": self.audience,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayAttestationDocument:
+    """Result of `verify_gateway_attestation_document()`.
+
+    It has no `cert_sha256`: the document names no certificate as the
+    connection's, so code written against `GatewayAttestation` that reads one
+    fails rather than trusting it. `binding` is always `"none"`.
+
+    `cert_sha256_candidates` lists the SHA-256-shaped values the token commits
+    to other than your nonce: labelled certificate claims when present, then
+    `eat_nonce` entries. The gateway's TLS leaf certificate hash is among them,
+    alongside other per-instance or per-connection commitments, so test
+    membership rather than picking an entry. A match is a comparison you make,
+    not a binding this SDK checked; when you hold the certificate, pass it to
+    `verify_gateway_attestation()` as `tls_cert_der` instead.
+
+    `nonce` is the fresh nonce you supplied, found in the token's
+    `eat_nonce`."""
+
+    cert_sha256_candidates: tuple[str, ...]
+    image_digest: str
+    image_reference: str
+    nonce: str
+    expires_at: int | None
+    issuer: str | None
+    audience: str | None
+    raw_claims: Mapping[str, Any]
+
+    @property
+    def binding(self) -> Literal["none"]:
+        """Always `"none"`: document verification checks no TLS evidence."""
+        return "none"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "binding": self.binding,
+            "cert_sha256_candidates": list(self.cert_sha256_candidates),
             "image_digest": self.image_digest,
             "image_reference": self.image_reference,
             "nonce": self.nonce,
@@ -271,11 +359,14 @@ def _check_claims(
     nonce_hex: str | None,
     tls_cert_der: bytes | None,
     tls_exporter: bytes | None,
-    binding_mode: Literal["live-channel", "receipt-key"] = "live-channel",
+    binding_mode: Literal["live-channel", "document"] = "live-channel",
 ) -> GatewayAttestation:
     """Validate every claim the policy requires. Raises on any mismatch.
-    Returns a GatewayAttestation if everything checks out."""
-    if binding_mode not in {"live-channel", "receipt-key"}:
+    Returns a GatewayAttestation if everything checks out.
+
+    `"document"` mode checks the token alone: no TLS evidence, and the nonce
+    (or receipt-key commitment) must be in `eat_nonce` itself."""
+    if binding_mode not in {"live-channel", "document"}:
         raise AttestationVerificationError(f"unsupported attestation binding mode {binding_mode!r}")
     now = int(time.time())
     exp = claims.get("exp")
@@ -375,7 +466,9 @@ def _check_claims(
     if isinstance(nonces, str):
         nonces = [nonces]
     if nonce_hex is not None:
-        if binding_mode == "receipt-key":
+        if binding_mode == "document":
+            # Receipt-key commitments and document challenges must appear in
+            # eat_nonce itself, never only in the legacy `nonces` fallback.
             if isinstance(eat_nonces, str):
                 receipt_nonces = [eat_nonces]
             elif isinstance(eat_nonces, list):
@@ -408,6 +501,7 @@ def _check_claims(
         ):
             raise AttestationVerificationError("TLS exporter binding not present in JWT nonces")
 
+    binding: AttestationBinding = "none"
     if binding_mode == "live-channel":
         # Cert binding: the gateway includes the SHA-256 hex of its TLS
         # leaf cert as a nonce-style claim too (`tls_cert_sha256` or
@@ -421,6 +515,12 @@ def _check_claims(
         if not isinstance(cert_sha, str) or len(cert_sha) != 64:
             raise AttestationVerificationError(
                 "JWT does not commit to a TLS cert SHA-256 — cannot bind connection"
+                + (
+                    ""
+                    if tls_cert_der is not None
+                    else "; pass tls_cert_der from this connection, or use "
+                    "verify_gateway_attestation_document() for document-only verification"
+                )
             )
         cert_sha = cert_sha.lower()
 
@@ -437,9 +537,17 @@ def _check_claims(
             raise AttestationVerificationError(
                 "JWT-committed cert SHA-256 doesn't match policy pin"
             )
+
+        # A policy pin compares the token with a published hash, not with this
+        # connection, so it does not raise the binding on its own.
+        if tls_exporter is not None:
+            binding = "tls-exporter"
+        elif tls_cert_der is not None:
+            binding = "tls-cert"
     else:
-        # A receipt attestation certifies a durable signing key. It is not
-        # evidence about the verifier's current TLS connection.
+        # A receipt attestation certifies a durable signing key, and a document
+        # check has no connection to compare. Neither is evidence about the
+        # verifier's current TLS connection.
         cert_sha = ""
 
     return GatewayAttestation(
@@ -451,7 +559,29 @@ def _check_claims(
         issuer=GCP_ISSUER,
         audience=policy.gcp_audience,
         raw_claims=dict(claims),
+        binding=binding,
     )
+
+
+def _cert_sha256_candidates(claims: Mapping[str, Any], nonce_hex: str) -> tuple[str, ...]:
+    """SHA-256-shaped commitments in the token other than the caller nonce:
+    labelled certificate claims first, then `eat_nonce` entries, lowercased
+    and deduplicated."""
+    eat_nonce = claims.get("eat_nonce")
+    if isinstance(eat_nonce, str):
+        eat_nonce = [eat_nonce]
+    elif not isinstance(eat_nonce, list):
+        eat_nonce = []
+    labelled = (claims.get("tls_cert_sha256"), claims.get("workload_tls_cert_sha256"))
+    nonce = nonce_hex.lower()
+    candidates: list[str] = []
+    for value in (*labelled, *eat_nonce):
+        if not isinstance(value, str) or _SHA256_HEX.fullmatch(value) is None:
+            continue
+        hex_value = value.lower()
+        if hex_value != nonce and hex_value not in candidates:
+            candidates.append(hex_value)
+    return tuple(candidates)
 
 
 def _find_cert_in_nonces(nonces: list[Any], tls_cert_der: bytes | None) -> str | None:
@@ -528,13 +658,21 @@ def verify_gateway_attestation(
     TLS session used to fetch `/attestation`; when provided, the JWT
     must bind both that exporter and a distinct fresh `nonce_hex`.
 
+    The token must commit to a TLS certificate hash. Live gateway tokens
+    carry it only as an `eat_nonce` entry, which is found by hashing
+    `tls_cert_der`, so without the certificate this raises. A caller that
+    cannot see its TLS connection uses
+    `verify_gateway_attestation_document()` instead and gets
+    `binding="none"` rather than a cert binding it never checked.
+
     Pass `jwks=` to inject a pre-fetched JWKS dict (e.g. for offline
     verification or tests); otherwise the function fetches Google's
     public JWKS at boot.
 
-    Returns a GatewayAttestation on success. Raises
-    AttestationVerificationError on any failure — never returns False
-    or None for a failed verification."""
+    Returns a GatewayAttestation on success; `binding` reports which
+    connection evidence was checked. Raises AttestationVerificationError
+    on any failure — never returns False or None for a failed
+    verification."""
     payload = _verified_jwt_claims(document, jwks=jwks, jwks_url=jwks_url)
     return _check_claims(
         payload,
@@ -543,6 +681,66 @@ def verify_gateway_attestation(
         tls_cert_der=tls_cert_der,
         tls_exporter=tls_exporter,
         binding_mode="live-channel",
+    )
+
+
+def verify_gateway_attestation_document(
+    document: bytes,
+    *,
+    policy: AttestationPolicy,
+    nonce_hex: str,
+    jwks: Mapping[str, Any] | None = None,
+    jwks_url: str = GCP_JWKS_URI,
+) -> GatewayAttestationDocument:
+    """Verify a gateway attestation document on its own, with no TLS binding.
+
+    For callers that cannot see the TLS connection their requests use: code
+    behind an HTTP proxy or a platform HTTP stack, or anything that only holds
+    the document. It runs every check `verify_gateway_attestation()` runs on
+    the token — Google's signature, issuer, audience, expiry, production
+    Confidential Space claims, and the policy's image pins — and requires
+    `nonce_hex` in `eat_nonce`, so the token was minted for this challenge
+    rather than replayed.
+
+    It checks no TLS certificate or exporter, and the result says so with
+    `binding="none"`. A verified document shows that a workload running a
+    pinned build answered your challenge; it does not show that your other
+    requests reach that workload. Because nothing here trusts the transport,
+    the document may be fetched through a relay without weakening the result;
+    the JWKS and the policy must not come from that relay.
+
+    `document` is the JWT from `client.attestation(nonce_hex=...)`.
+    `policy` comes from `policy_from_trust_release()` and must pin an image.
+    `nonce_hex` is 16 to 64 fresh random bytes as hex, sent with that request
+    (`secrets.token_hex(32)`).
+
+    Raises AttestationVerificationError on any failure — never returns False
+    or None for a failed verification."""
+    # Freshness is the only thing tying a document to this moment, so a
+    # missing, short, or non-hex challenge is refused before any network or
+    # crypto work.
+    if not isinstance(nonce_hex, str) or _FRESH_NONCE_HEX.fullmatch(nonce_hex) is None:
+        raise AttestationVerificationError(
+            "document verification requires a fresh nonce of 16 to 64 random bytes as hex"
+        )
+    payload = _verified_jwt_claims(document, jwks=jwks, jwks_url=jwks_url)
+    verified = _check_claims(
+        payload,
+        policy=policy,
+        nonce_hex=nonce_hex,
+        tls_cert_der=None,
+        tls_exporter=None,
+        binding_mode="document",
+    )
+    return GatewayAttestationDocument(
+        cert_sha256_candidates=_cert_sha256_candidates(payload, nonce_hex),
+        image_digest=verified.image_digest,
+        image_reference=verified.image_reference,
+        nonce=nonce_hex,
+        expires_at=verified.expires_at,
+        issuer=verified.issuer,
+        audience=verified.audience,
+        raw_claims=verified.raw_claims,
     )
 
 
@@ -568,7 +766,7 @@ def verify_receipt_key_attestation(
         nonce_hex=key_commitment_hex,
         tls_cert_der=None,
         tls_exporter=None,
-        binding_mode="receipt-key",
+        binding_mode="document",
     )
 
 
@@ -577,10 +775,13 @@ __all__ = [
     "EXPORTER_LENGTH",
     "GCP_ISSUER",
     "GCP_JWKS_URI",
+    "AttestationBinding",
     "AttestationPolicy",
     "AttestationVerificationError",
     "GatewayAttestation",
+    "GatewayAttestationDocument",
     "policy_from_trust_release",
     "verify_gateway_attestation",
+    "verify_gateway_attestation_document",
     "verify_receipt_key_attestation",
 ]

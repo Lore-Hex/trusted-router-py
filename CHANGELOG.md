@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.0
+
+- `verify_gateway_attestation_document(document, policy=..., nonce_hex=...)`:
+  document-only gateway attestation for callers that cannot see their TLS
+  connection, which includes every `httpx` caller. It runs every token check
+  `verify_gateway_attestation()` runs (Google signature, issuer, audience,
+  expiry, production Confidential Space claims, image pins) and requires a
+  fresh 16–64-byte caller nonce in `eat_nonce`, but claims no TLS binding. Its
+  `GatewayAttestationDocument` result has `binding == "none"`, no
+  `cert_sha256`, and `cert_sha256_candidates` for callers who later hold the
+  certificate. Live gateway tokens carry the certificate hash only as an
+  `eat_nonce` entry, so until now nothing could pass without the certificate.
+- `binding: "none" | "tls-cert" | "tls-exporter"` on every
+  `GatewayAttestation` (type `AttestationBinding`, also in `as_dict()`),
+  reporting which connection evidence was actually compared.
+  `verify_gateway_session()` and `fetch_attestation_again()` report
+  `"tls-exporter"`; `tls_cert_der` gives `"tls-cert"`; a certificate hash that
+  is only claimed by the token, or only matched against a policy pin, gives
+  `"none"`. The field defaults to `"none"`, so existing constructors keep
+  working.
+- `client.attestation(nonce_hex=...)` (sync and async) sends the challenge as
+  `/attestation?nonce=`. Without it the request is unchanged.
+- `trustedrouter attest --verify` sends a fresh nonce and verifies the document
+  with `verify_gateway_attestation_document()`; it failed against the live
+  gateway before ("JWT does not commit to a TLS cert SHA-256"), for the reason
+  above. Its JSON `data` now carries `binding`, `nonce`, and
+  `cert_sha256_candidates` instead of `cert_sha256`.
+- `verify_gateway_attestation()` behaves as before. When it cannot find a
+  certificate commitment without `tls_cert_der`, the error now names the
+  document-only verifier.
+- Internal: a live-gateway claims fixture (container env stripped) and three
+  document-mode mutations in the mutation gate.
+
 ## 0.8.0
 
 - Offline signed inference receipt verification: `trustedrouter.receipts.verify_receipt()`

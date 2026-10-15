@@ -629,8 +629,10 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
             try:
                 assert first.leaf_der == leaf_der
                 assert first.exporter == server_exporters[0]
+                assert first.attestation.binding == "tls-exporter"
                 followup = tr_session.fetch_attestation_again(first)
                 assert followup.cert_sha256 == cert_sha
+                assert followup.binding == "tls-exporter"
             finally:
                 _close_pyopenssl_connection(first.connection)
 

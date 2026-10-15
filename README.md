@@ -352,32 +352,69 @@ Full flow, endpoints, and security notes:
 
 Every TrustedRouter response is generated inside a Google Confidential Space
 workload. The gateway's `/attestation` endpoint mints a Google-signed JWT
-that commits to the workload image digest, image reference, your nonce, and
-the TLS leaf cert SHA-256. Verifying it proves the prompt path you're about
-to use is the exact build the trust page advertises:
+that commits to the workload image digest, image reference, your nonce, the
+TLS leaf cert SHA-256, and the TLS exporter of the session that asked for it.
+Verifying it proves the token came from the exact build the trust page
+advertises. How much it proves about *your connection* depends on what you can
+check, and every result says which with `binding`:
+
+| `binding` | Verifier | What a pass adds to the token checks |
+|---|---|---|
+| `"tls-exporter"` | `verify_gateway_session()` from `trustedrouter.session` | The token was minted inside your own TLS session, and that pinned connection is returned for your requests. |
+| `"tls-cert"` | `verify_gateway_attestation()` with `tls_cert_der` | The token commits to the certificate your connection presented. |
+| `"none"` | `verify_gateway_attestation_document()` | Nothing about your connection. With your fresh nonce, a pinned build answered just now. |
+
+The token checks are the same in all three: Google's RS256 signature, issuer,
+audience, expiry, production Confidential Space claims (debug off, Secure
+Boot, confidential hardware), and the image digest/reference pins from the
+trust release.
+
+`httpx` does not expose the TLS connection, so with the regular client you
+verify the document:
 
 ```python
+import secrets
+
 from trustedrouter import TrustedRouter
 from trustedrouter.attestation import (
-    verify_gateway_attestation, policy_from_trust_release,
+    policy_from_trust_release, verify_gateway_attestation_document,
 )
 
-# Verify the signed workload identity against the published release.
-policy = policy_from_trust_release()
+policy = policy_from_trust_release()       # pulls the live trust release
+nonce_hex = secrets.token_hex(32)
 with TrustedRouter(api_key="sk-tr-v1-...") as client:
-    jwt = client.attestation()
-    attestation = verify_gateway_attestation(jwt, policy=policy)
-    print("verified gateway:", attestation.image_digest)
+    jwt = client.attestation(nonce_hex=nonce_hex)  # GET /attestation?nonce=...
+
+attestation = verify_gateway_attestation_document(jwt, policy=policy, nonce_hex=nonce_hex)
+print(attestation.binding)       # "none"
+print(attestation.image_digest)  # a digest the trust release pins
 ```
 
-`verify_gateway_attestation()` raises `AttestationVerificationError` on any
-of: bad signature, expired JWT, wrong issuer, audience mismatch,
-image_digest mismatch, image_reference mismatch, missing nonce echo, or
-TLS cert mismatch. Never returns falsey for a failed verification.
+`verify_gateway_attestation_document()` requires a fresh nonce of 16 to 64
+random bytes (as hex) and requires it in the token's `eat_nonce`, so a stored
+token cannot be replayed at you. Its result has no `cert_sha256`: the token
+names no certificate as your connection's. `cert_sha256_candidates` lists the
+SHA-256-shaped values the token commits to besides your nonce; the gateway's
+leaf certificate hash is one of them. If you hold the DER certificate of your
+connection, pass it to `verify_gateway_attestation(jwt, policy=policy,
+nonce_hex=nonce_hex, tls_cert_der=...)` instead, which checks it and reports
+`binding="tls-cert"`.
 
-This example verifies signed workload identity. To prove a live TLS exporter
-and a same-socket follow-up challenge, use `verify_gateway_session()` or
-`trustedrouter attest --session`; a certificate from a separate connection
+`verify_gateway_attestation()` keeps its behaviour: it requires a certificate
+binding, and because live tokens carry the certificate hash only as an
+`eat_nonce` entry, it raises without `tls_cert_der`, naming the document-only
+verifier in the error.
+
+Both raise `AttestationVerificationError` on any failure: bad signature,
+expired JWT, wrong issuer, audience mismatch, image_digest mismatch,
+image_reference mismatch, missing nonce echo, or TLS cert mismatch. Neither
+returns falsey for a failed verification.
+
+A document check shows that the gateway is serving a published build right
+now. It does not show that your other requests reach that gateway, and it says
+nothing about the model providers the gateway routes to. To prove a live TLS
+exporter and a same-socket follow-up challenge, use `verify_gateway_session()`
+or `trustedrouter attest --session`; a certificate from a separate connection
 does not establish that binding.
 
 This codepath needs `cryptography`; install with
@@ -458,16 +495,18 @@ trustedrouter providers                    # list provider catalog
 trustedrouter models                       # list model catalog
 trustedrouter trust                        # show trust release
 trustedrouter attest                       # raw attestation JWT bytes
-trustedrouter attest --verify              # verify signature + workload identity
+trustedrouter attest --verify              # fresh nonce + verify the document
 trustedrouter attest --session             # prove live same-socket TLS binding
 trustedrouter --version
 ```
 
 The raw `attest` command is available in the base install. Install
 `trusted-router-py[attestation]` to use `attest --verify` or
-`attest --session`. `--verify` validates the signed document against the
-published workload identity. Only `--session` proves the live TLS exporter and
-performs a same-socket follow-up challenge. `--connect-ip` is accepted only
+`attest --session`. `--verify` sends a fresh nonce and checks the document's
+signature, workload identity, and nonce echo against the published trust
+release; like `verify_gateway_attestation_document()`, it reports
+`binding: "none"`. Only `--session` proves the live TLS exporter and performs a
+same-socket follow-up challenge. `--connect-ip` is accepted only
 with `--session` and must not be empty.
 
 ### Agent and JSON contract

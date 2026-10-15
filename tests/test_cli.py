@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 
 import httpx
 import pytest
@@ -205,35 +206,53 @@ def test_attest_verify_success(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """--verify challenges the gateway with a fresh nonce and checks the
+    document against that same nonce, without claiming a TLS binding."""
+
     class FakeResult:
         def as_dict(self) -> dict[str, str]:
-            return {"status": "verified"}
+            return {"binding": "none"}
 
-    def handler(_request: httpx.Request) -> httpx.Response:
+    sent: list[str | None] = []
+    verified: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/attestation"
+        sent.append(request.url.params.get("nonce"))
         return httpx.Response(200, content=b"<JWT>")
 
     def fake_verify(
         document: bytes,
         *,
         policy: object,
+        nonce_hex: str,
     ) -> FakeResult:
         assert document == b"<JWT>"
         assert policy == {"policy": "ok"}
+        verified.append(nonce_hex)
         return FakeResult()
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("--verify must not require a TLS certificate binding")
 
     _patch_client(monkeypatch, handler)
     import trustedrouter.attestation as attestation
 
     monkeypatch.setattr(attestation, "policy_from_trust_release", lambda: {"policy": "ok"})
-    monkeypatch.setattr(attestation, "verify_gateway_attestation", fake_verify)
+    monkeypatch.setattr(attestation, "verify_gateway_attestation_document", fake_verify)
+    monkeypatch.setattr(attestation, "verify_gateway_attestation", unexpected)
 
-    rc = cli.main(["attest", "--verify", "--json"])
-    assert rc == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "ok": True,
-        "command": "attest.verify",
-        "data": {"status": "verified"},
-    }
+    for _ in range(2):
+        rc = cli.main(["attest", "--verify", "--json"])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "ok": True,
+            "command": "attest.verify",
+            "data": {"binding": "none"},
+        }
+    assert sent == verified
+    assert all(re.fullmatch(r"[0-9a-f]{64}", nonce) for nonce in verified)
+    assert verified[0] != verified[1]
 
 
 def test_attest_verify_error_returns_code_1(
@@ -249,7 +268,7 @@ def test_attest_verify_error_returns_code_1(
     monkeypatch.setattr(attestation, "policy_from_trust_release", lambda: {"policy": "ok"})
     monkeypatch.setattr(
         attestation,
-        "verify_gateway_attestation",
+        "verify_gateway_attestation_document",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("verification failed")),
     )
     rc = cli.main(["attest", "--verify"])

@@ -8,7 +8,7 @@ Usage:
   trustedrouter providers             # list provider catalog
   trustedrouter models                # list model catalog
   trustedrouter attest                # fetch raw attestation JWT
-  trustedrouter attest --verify       # fetch + verify against trust release
+  trustedrouter attest --verify       # fresh nonce + verify the document
   trustedrouter trust                 # show the published trust release
 
 Reads bearer from $TRUSTEDROUTER_API_KEY (or $TR_API_KEY). Plain mode preserves
@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys as sys
 from contextlib import suppress
 from typing import Any, NoReturn, TextIO
@@ -482,27 +483,35 @@ def _cmd_attest(args: argparse.Namespace) -> int:
                 _print(session_result)
             return EXIT_SUCCESS
 
-        doc = client.attestation()
-        if not args.verify:
-            if args.json:
-                _emit_success("attest", {"document": doc.decode("utf-8", errors="replace")})
-            else:
-                sys.stdout.buffer.write(doc)
-            return EXIT_SUCCESS
-        # Identity-verification path. TLS exporter and same-socket binding are
-        # intentionally reserved for --session, where they can be proven on
-        # the exact connection that returned the attestation.
-        from trustedrouter.attestation import (
-            policy_from_trust_release,
-            verify_gateway_attestation,
-        )
+        if args.verify:
+            # Document verification: a fresh nonce proves the token answers
+            # this challenge, but httpx exposes no TLS evidence, so the result
+            # is binding "none". TLS exporter and same-socket binding are
+            # reserved for --session, where they can be proven on the exact
+            # connection that returned the attestation.
+            from trustedrouter.attestation import (
+                EXPORTER_LENGTH,
+                policy_from_trust_release,
+                verify_gateway_attestation_document,
+            )
 
-        policy = policy_from_trust_release()
-        verification_result = verify_gateway_attestation(doc, policy=policy)
+            nonce_hex = secrets.token_hex(EXPORTER_LENGTH)
+            doc = client.attestation(nonce_hex=nonce_hex)
+            policy = policy_from_trust_release()
+            verification_result = verify_gateway_attestation_document(
+                doc, policy=policy, nonce_hex=nonce_hex
+            )
+            if args.json:
+                _emit_success("attest.verify", verification_result.as_dict())
+            else:
+                _print(verification_result.as_dict())
+            return EXIT_SUCCESS
+
+        doc = client.attestation()
         if args.json:
-            _emit_success("attest.verify", verification_result.as_dict())
+            _emit_success("attest", {"document": doc.decode("utf-8", errors="replace")})
         else:
-            _print(verification_result.as_dict())
+            sys.stdout.buffer.write(doc)
     except (AuthenticationError, PermissionDeniedError) as exc:
         return _emit_error(
             args,
@@ -613,8 +622,10 @@ def _build_parser(*, json_mode: bool = False) -> argparse.ArgumentParser:
     att.json_mode = json_mode
     _add_subcommand_json_option(att)
     att.add_argument("--verify", action="store_true",
-                     help="Verify signature and workload identity (requires "
-                          "`pip install trusted-router-py[attestation]`).")
+                     help="Send a fresh nonce and verify the document's signature, "
+                          "workload identity, and nonce echo; not bound to the TLS "
+                          "connection (binding \"none\"). Requires "
+                          "`pip install trusted-router-py[attestation]`.")
     att.add_argument("--session", action="store_true",
                      help="Verify the G6 TLS-exporter binding and keep-alive pin.")
     att.add_argument("--connect-ip", default=None,

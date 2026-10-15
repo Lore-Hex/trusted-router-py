@@ -1,0 +1,62 @@
+{
+  "aud": "quill-cloud",
+  "exp": 1792093929,
+  "iat": 1792090329,
+  "iss": "https://confidentialcomputing.googleapis.com",
+  "nbf": 1792090329,
+  "sub": "https://www.googleapis.com/compute/v1/projects/quill-cloud-proxy/zones/europe-west4-c/instances/quill-enclave-mig-eu-6fq3",
+  "eat_nonce": [
+    "680d068ac5c0cbf16736d97f1b9b3339b4a41b71909f5312161c7c4bd562e63f",
+    "0a8633b2f07dca789193ccc45206d21431a72a8490985d050c56c6efa44cff00",
+    "528c35f65e25ad1f478e7e171126433b17c355bfac4e73beb82e6b383c4c2053",
+    "c12f26a367e3e910c00cb47d32885ef446b3cb0f7d48ea2c351aed963ca8fd0b"
+  ],
+  "eat_profile": "https://cloud.google.com/confidential-computing/confidential-space/docs/reference/token-claims",
+  "secboot": true,
+  "oemid": 11129,
+  "hwmodel": "GCP_INTEL_TDX",
+  "swname": "CONFIDENTIAL_SPACE",
+  "swversion": [
+    "260900"
+  ],
+  "attester_tcb": [
+    "INTEL"
+  ],
+  "dbgstat": "disabled-since-boot",
+  "submods": {
+    "confidential_space": {
+      "support_attributes": [
+        "LATEST",
+        "STABLE",
+        "USABLE"
+      ],
+      "monitoring_enabled": {
+        "memory": false
+      }
+    },
+    "container": {
+      "image_reference": "us-central1-docker.pkg.dev/quill-cloud-proxy/quill/enclave-multi:gcp-release-88c2e3b8",
+      "image_digest": "sha256:5faa5ed7b5c29ba87711cbbcd5a9aea97125d34a762e8d61a192074b31c5676d",
+      "restart_policy": "Always",
+      "image_id": "sha256:0ff7396333176eb360a408bcbed557076a7858969857e8a3ef0cc3b0f9b5e994",
+      "args": [
+        "/quill-enclave"
+      ]
+    },
+    "gce": {
+      "zone": "europe-west4-c",
+      "project_id": "quill-cloud-proxy",
+      "project_number": "44325983244",
+      "instance_name": "quill-enclave-mig-eu-6fq3",
+      "instance_id": "5786310897752159967"
+    }
+  },
+  "tdx": {
+    "gcp_attester_tcb_status": "UpToDate",
+    "gcp_attester_tcb_date": "2025-05-14T00:00:00Z",
+    "tcb_evaluation_data_number": 19
+  },
+  "google_service_accounts": [
+    "quill-workload@quill-cloud-proxy.iam.gserviceaccount.com"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "source": "GET https://api.trustedrouter.com/attestation?nonce=<32 random bytes hex>, with the TLS leaf read from the same connection",
+  "captured": "2026-10-15",
+  "google_signature": "verified against Google's live JWKS at capture",
+  "redacted": ["submods.container.env", "submods.container.env_override"],
+  "eat_nonce": {
+    "0": "SHA-256 of the served TLS leaf certificate (live-gateway-leaf.pem); the token has no tls_cert_sha256 claim",
+    "1": "gateway commitment not interpreted by this SDK (identical across instances)",
+    "2": "gateway commitment not interpreted by this SDK (differs per connection)",
+    "3": "the caller nonce from the request"
+  },
+  "note": "Claims are re-signed with a test key and given a fresh exp by the tests; the Google signature is not part of the fixture."
+}
