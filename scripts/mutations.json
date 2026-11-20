@@ -542,22 +542,85 @@
   {
     "name": "alias-step-aside",
     "file": "src/trusted_router/__init__.py",
-    "before": "_provider = _other_provider()",
-    "after": "_provider = None",
+    "before": "    provider = other_provider()",
+    "after": "    provider = None",
     "test": "tests/test_import_alias.py::test_step_aside"
   },
   {
     "name": "alias-module-identity",
     "file": "src/trusted_router/__init__.py",
-    "before": "        sys.modules[module.__name__] = import_module(self.canonical.name)",
-    "after": "        from importlib.machinery import SourceFileLoader\n        SourceFileLoader(module.__name__, self.canonical.origin).exec_module(module)",
+    "before": "            sys.modules[module.__name__] = import_module(self.canonical.name)",
+    "after": "            from importlib.machinery import SourceFileLoader\n            SourceFileLoader(module.__name__, self.canonical.origin).exec_module(module)",
     "test": "tests/test_import_alias.py::test_module_identity"
   },
   {
     "name": "alias-namespace-directory",
     "file": "src/trusted_router/__init__.py",
-    "before": "        if spec is None or _is_namespace(spec):",
-    "after": "        if spec is None:",
+    "before": "                if spec is None or is_namespace(spec):",
+    "after": "                if spec is None:",
     "test": "tests/test_import_alias.py::test_namespace_directory_does_not_hide_the_sdk"
+  },
+  {
+    "name": "alias-initialization-lock",
+    "file": "src/trusted_router/__init__.py",
+    "before": "        provider._initializing = initializing",
+    "after": "        provider._initializing = False",
+    "test": "tests/test_import_alias.py::test_concurrent_server_initialization"
+  },
+  {
+    "name": "alias-second-copy",
+    "file": "src/trusted_router/__init__.py",
+    "before": "        return code is not None and \"_trusted_router_sdk_alias\" in code.co_names",
+    "after": "        return False",
+    "test": "tests/test_import_alias.py::test_second_shim_copy"
+  },
+  {
+    "name": "alias-reload-identity",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            _bootstrap._exec(provider, module)",
+    "after": "            from importlib.util import module_from_spec\n            module = module_from_spec(provider)\n            sys.modules[\"trusted_router\"] = module\n            _bootstrap._exec(provider, module)",
+    "test": "tests/test_import_alias.py::test_server_reload_identity_and_metadata"
+  },
+  {
+    "name": "alias-ignored-paths",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            paths = ([entry] for entry in sys.path if isinstance(entry, str))",
+    "after": "            from pathlib import Path\n            paths = ([str(Path(entry))] for entry in sys.path)",
+    "test": "tests/test_import_alias.py::test_ignored_sys_path_entries"
+  },
+  {
+    "name": "alias-legacy-finder",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            discover = getattr(finder, \"find_spec\", None)",
+    "after": "            discover = finder.find_spec",
+    "test": "tests/test_import_alias.py::test_legacy_finder_is_skipped"
+  },
+  {
+    "name": "alias-legacy-loader",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            _bootstrap._exec(provider, module)",
+    "after": "            _bootstrap._init_module_attrs(provider, module, override=True)\n            provider.loader.exec_module(module)",
+    "test": "tests/test_import_alias.py::test_legacy_provider_loader"
+  },
+  {
+    "name": "alias-zip-code",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            get_code = getattr(self.canonical.loader, \"get_code\", None)",
+    "after": "            from importlib.abc import InspectLoader\n            get_code = (self.canonical.loader.get_code\n                        if isinstance(self.canonical.loader, InspectLoader) else None)",
+    "test": "tests/test_import_alias.py::test_zip_cli"
+  },
+  {
+    "name": "alias-missing-spec",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            if canonical is None:\n                return None",
+    "after": "            if canonical is None:\n                raise ModuleNotFoundError(fullname, name=fullname)",
+    "test": "tests/test_import_alias.py::test_missing_submodule_spec"
+  },
+  {
+    "name": "alias-stale-submodules",
+    "file": "src/trusted_router/__init__.py",
+    "before": "                del sys.modules[name]",
+    "after": "                pass",
+    "test": "tests/test_import_alias.py::test_reimport_steps_aside"
   }
 ]
