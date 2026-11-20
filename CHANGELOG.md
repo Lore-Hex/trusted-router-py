@@ -4,8 +4,8 @@
 
 - Accept `trusted_router` as an alias for `trustedrouter`, sharing the same
   modules and classes under both spellings.
-- Step aside for any other `trusted_router` package, including editable
-  installs that appear after the SDK on the import path.
+- An ordinary source package named `trusted_router` elsewhere on the import path takes
+  precedence; other kinds of providers are not detected.
 - Nothing else changed.
 
 ## 0.9.0

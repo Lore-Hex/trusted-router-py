@@ -25,7 +25,10 @@ SOURCES = {
     "_retry.py", "_routing.py", "_sse.py", "_telemetry.py", "_transport.py",
     "attestation.py", "client.py", "models.py", "oauth.py", "py.typed", "receipts.py", "session.py",
 }
-ALIAS_SOURCES = {"__init__.py", "py.typed"}
+ALIAS_SOURCES = {
+    "__init__.py", "py.typed", "attestation.pyi", "client.pyi", "models.pyi", "oauth.pyi",
+    "receipts.pyi", "session.pyi",
+}
 DIST = "trusted_router_py-0.10.0"
 UV = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
 
@@ -187,6 +190,16 @@ def test_installed_alias_typing(installed: Installed) -> None:
     source.write_text('''
 from trusted_router import TrustedRouter, AsyncTrustedRouter, ChatMessage
 from trustedrouter import TrustedRouter as Canonical
+from trusted_router.models import ChatMessage as AliasMessage
+from trusted_router.client import TrustedRouter as AliasClient
+from trusted_router.attestation import AttestationVerificationError
+from trusted_router.oauth import create_pkce_pair
+from trusted_router.receipts import ReceiptCapture
+from trusted_router.session import verify_gateway_session
+
+message: ChatMessage = AliasMessage(role="user", content="hello")
+alias_client: Canonical = AliasClient(api_key="fake")
+reveal_type(message)
 
 client: Canonical = TrustedRouter(api_key="fake")
 reveal_type(TrustedRouter(api_key="fake"))

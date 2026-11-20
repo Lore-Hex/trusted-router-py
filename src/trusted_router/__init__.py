@@ -1,4 +1,4 @@
-# Accept the SDK spelling without hiding another regular trusted_router package.
+# Accept the SDK spelling without hiding an ordinary trusted_router file provider.
 # Keep bootstrap state local: a server must retain its own dictionary on reload.
 from typing import TYPE_CHECKING as _TYPE_CHECKING
 
@@ -14,7 +14,7 @@ def _trusted_router_sdk_alias() -> None:
     from collections.abc import Sequence
     from importlib import _bootstrap, import_module
     from importlib.abc import Loader, MetaPathFinder
-    from importlib.machinery import ModuleSpec, PathFinder
+    from importlib.machinery import ModuleSpec, PathFinder, SourceFileLoader, SourcelessFileLoader
     from importlib.util import find_spec, spec_from_loader
     from types import CodeType, ModuleType
 
@@ -25,24 +25,27 @@ def _trusted_router_sdk_alias() -> None:
         return getattr(finder, "_trusted_router_alias", False) is True
 
     def is_shim(spec: ModuleSpec) -> bool:
-        # Filesystem identity handles symlinks and case variants. Code markers
-        # also recognize separate installs, including zip/wheel importers,
-        # without executing another shim (or importing the SDK into a server).
-        if spec.origin is not None:
-            try:
-                if os.path.samefile(spec.origin, __file__):
-                    return True
-            except (OSError, ValueError):
-                pass
-        get_code = getattr(spec.loader, "get_code", None)
-        code = get_code("trusted_router") if get_code is not None else None
-        return code is not None and "_trusted_router_sdk_alias" in code.co_names
+        # Only standard file loaders reach here. Identity handles symlinks and
+        # case variants; the code marker recognizes separately installed copies.
+        try:
+            if os.path.samefile(spec.origin, __file__):  # type: ignore[arg-type]
+                return True
+        except (OSError, ValueError):
+            pass
+        try:
+            code = spec.loader.get_code("trusted_router")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 -- Inspection is optional; execution owns errors.
+            return False
+        return isinstance(code, CodeType) and "_trusted_router_sdk_alias" in code.co_names
 
-    def is_namespace(spec: ModuleSpec) -> bool:
+    def is_file_provider(spec: ModuleSpec) -> bool:
+        # Exact types deliberately exclude wrappers, subclasses, and zip loaders.
+        # The location checks also exclude namespace and locationless specs.
         return (
-            spec.origin is None
-            and spec.submodule_search_locations is not None
-            and (spec.loader is None or type(spec.loader).__name__.endswith("NamespaceLoader"))
+            type(spec.loader) in (SourceFileLoader, SourcelessFileLoader)
+            and spec.has_location
+            and spec.origin is not None
+            and os.path.isfile(spec.origin)
         )
 
     def other_provider() -> ModuleSpec | None:
@@ -57,8 +60,11 @@ def _trusted_router_sdk_alias() -> None:
             # Search separately so a second shim cannot conceal a later server.
             paths = ([entry] for entry in sys.path if isinstance(entry, str))
             for path in paths if finder is PathFinder else (None,):
-                spec: ModuleSpec | None = discover("trusted_router", path)
-                if spec is None or is_namespace(spec):
+                try:
+                    spec: ModuleSpec | None = discover("trusted_router", path)
+                except Exception:  # noqa: BLE001, S112 -- Foreign discovery is best effort.
+                    continue
+                if spec is None or not is_file_provider(spec):
                     continue
                 if not is_shim(spec):
                     return spec
@@ -104,13 +110,27 @@ def _trusted_router_sdk_alias() -> None:
             if (name.startswith("trusted_router.")
                     and cached is sys.modules.get("trustedrouter" + name[len("trusted_router"):])):
                 del sys.modules[name]
-        # _exec is importlib's reload primitive: retain the locked module and its
-        # dictionary, restore all provider metadata, and support legacy loaders.
-        # Transfer initialization state before _exec publishes the provider spec.
-        initializing = getattr(module.__spec__, "_initializing", False)
+        # Standard file loaders create no custom module state, so _exec can
+        # retain the locked module and dictionary while restoring its metadata.
+        if not hasattr(_bootstrap, "_exec"):
+            raise ImportError("trusted_router handoff requires importlib._bootstrap._exec")
+        try:
+            initializing = module.__spec__._initializing  # type: ignore[union-attr]
+        except AttributeError:
+            # Reload specs normally lack the flag. Only accept that absence for
+            # a reload explicitly tracked by importlib; _exec holds its lock.
+            reloading = getattr(sys.modules["importlib"], "_RELOADING", {})
+            if reloading.get("trusted_router") is not module:
+                raise ImportError(
+                    "trusted_router handoff requires the import spec's _initializing attribute"
+                ) from None
+            initializing = False
+        if provider.submodule_search_locations is None:
+            module.__dict__.pop("__path__", None)
+        # Transfer state before publishing the provider spec to other importers.
         provider._initializing = initializing  # type: ignore[attr-defined]
         try:
-            _bootstrap._exec(provider, module)  # type: ignore[attr-defined]
+            _bootstrap._exec(provider, module)
         except BaseException:
             if initializing:
                 sys.modules.pop("trusted_router", None)

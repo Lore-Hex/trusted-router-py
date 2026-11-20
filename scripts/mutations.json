@@ -556,7 +556,7 @@
   {
     "name": "alias-namespace-directory",
     "file": "src/trusted_router/__init__.py",
-    "before": "                if spec is None or is_namespace(spec):",
+    "before": "                if spec is None or not is_file_provider(spec):",
     "after": "                if spec is None:",
     "test": "tests/test_import_alias.py::test_namespace_directory_does_not_hide_the_sdk"
   },
@@ -570,7 +570,7 @@
   {
     "name": "alias-second-copy",
     "file": "src/trusted_router/__init__.py",
-    "before": "        return code is not None and \"_trusted_router_sdk_alias\" in code.co_names",
+    "before": "        return isinstance(code, CodeType) and \"_trusted_router_sdk_alias\" in code.co_names",
     "after": "        return False",
     "test": "tests/test_import_alias.py::test_second_shim_copy"
   },
@@ -596,13 +596,6 @@
     "test": "tests/test_import_alias.py::test_legacy_finder_is_skipped"
   },
   {
-    "name": "alias-legacy-loader",
-    "file": "src/trusted_router/__init__.py",
-    "before": "            _bootstrap._exec(provider, module)",
-    "after": "            _bootstrap._init_module_attrs(provider, module, override=True)\n            provider.loader.exec_module(module)",
-    "test": "tests/test_import_alias.py::test_legacy_provider_loader"
-  },
-  {
     "name": "alias-zip-code",
     "file": "src/trusted_router/__init__.py",
     "before": "            get_code = getattr(self.canonical.loader, \"get_code\", None)",
@@ -622,5 +615,68 @@
     "before": "                del sys.modules[name]",
     "after": "                pass",
     "test": "tests/test_import_alias.py::test_reimport_steps_aside"
+  },
+  {
+    "name": "alias-exact-loader-type",
+    "file": "src/trusted_router/__init__.py",
+    "before": "type(spec.loader) in (SourceFileLoader, SourcelessFileLoader)",
+    "after": "isinstance(spec.loader, (SourceFileLoader, SourcelessFileLoader))",
+    "test": "tests/test_import_alias.py::test_unsupported_provider_is_ignored"
+  },
+  {
+    "name": "alias-raising-finder",
+    "file": "src/trusted_router/__init__.py",
+    "before": "except Exception:  # noqa: BLE001, S112 -- Foreign discovery is best effort.\n                    continue",
+    "after": "except Exception:\n                    raise",
+    "test": "tests/test_import_alias.py::test_raising_foreign_finder"
+  },
+  {
+    "name": "alias-inspection-error",
+    "file": "src/trusted_router/__init__.py",
+    "before": "except Exception:  # noqa: BLE001 -- Inspection is optional; execution owns errors.\n            return False",
+    "after": "except Exception:\n            raise",
+    "test": "tests/test_import_alias.py::test_standard_loader_code_inspection"
+  },
+  {
+    "name": "alias-inspection-type",
+    "file": "src/trusted_router/__init__.py",
+    "before": "isinstance(code, CodeType) and \"_trusted_router_sdk_alias\" in code.co_names",
+    "after": "code is not None and \"_trusted_router_sdk_alias\" in code.co_names",
+    "test": "tests/test_import_alias.py::test_standard_loader_code_inspection"
+  },
+  {
+    "name": "alias-location",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            and spec.has_location\n",
+    "after": "",
+    "test": "tests/test_import_alias.py::test_unsupported_provider_is_ignored"
+  },
+  {
+    "name": "alias-file-exists",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            and os.path.isfile(spec.origin)\n",
+    "after": "",
+    "test": "tests/test_import_alias.py::test_unsupported_provider_is_ignored"
+  },
+  {
+    "name": "alias-module-path",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            module.__dict__.pop(\"__path__\", None)",
+    "after": "            pass",
+    "test": "tests/test_import_alias.py::test_standard_module_metadata"
+  },
+  {
+    "name": "alias-private-exec",
+    "file": "src/trusted_router/__init__.py",
+    "before": "        if not hasattr(_bootstrap, \"_exec\"):",
+    "after": "        if False:",
+    "test": "tests/test_import_alias.py::test_missing_importlib_protocol"
+  },
+  {
+    "name": "alias-private-initializing",
+    "file": "src/trusted_router/__init__.py",
+    "before": "            if reloading.get(\"trusted_router\") is not module:",
+    "after": "            if False:",
+    "test": "tests/test_import_alias.py::test_missing_importlib_protocol"
   }
 ]

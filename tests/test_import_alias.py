@@ -358,9 +358,12 @@ def test_server_reload_identity_and_metadata(real_package: Path) -> None:
         sys.path.append(sys.argv[1])
         expected = PathFinder.find_spec("trusted_router", [sys.argv[1]])
         import trusted_router as server
+        assert set(vars(server)) == {
+            "__name__", "__doc__", "__package__", "__loader__", "__spec__", "__path__",
+            "__file__", "__cached__", "__builtins__", "sys", "serve", "marker",
+        }
         sentinel = server.sentinel = object()
         for _ in range(2):
-            assert importlib.reload(server) is server
             assert sys.modules["trusted_router"] is server
             assert server.sentinel is sentinel
             assert server.__name__ == server.__spec__.name == "trusted_router"
@@ -372,6 +375,7 @@ def test_server_reload_identity_and_metadata(real_package: Path) -> None:
             assert server.__loader__.path == expected.loader.path
             assert server.__cached__ == expected.cached
             assert server.serve.marker == "serve"
+            assert importlib.reload(server) is server
     ''', str(real_package)) == ""
 
 
@@ -402,35 +406,233 @@ def test_legacy_finder_is_skipped(real_package: Path) -> None:
     ''', str(real_package)) == ""
 
 
-def test_legacy_provider_loader() -> None:
+@pytest.mark.parametrize("kind", ["get-code-error", "create-state", "legacy", "subclass",
+                                  "locationless", "missing-origin"])
+def test_unsupported_provider_is_ignored(real_package: Path, kind: str) -> None:
+    assert run_code('''
+        import sys
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import spec_from_file_location
+        class CustomLoader:
+            def create_module(self, spec):
+                from types import ModuleType
+                module = ModuleType(spec.name)
+                module.required_state = "server"
+                return module
+            def exec_module(self, module):
+                module.marker = module.required_state
+            def get_code(self, name):
+                if sys.argv[2] == "get-code-error":
+                    raise RuntimeError("optional inspection failed")
+                return None
+        class LegacyLoader:
+            def load_module(self, name):
+                raise AssertionError("unsupported loader executed")
+        class SubclassLoader(SourceFileLoader):
+            pass
+        origin = sys.argv[1] + "/trusted_router/__init__.py"
+        kind = sys.argv[2]
+        loader = SourceFileLoader("trusted_router", origin)
+        if kind in ("get-code-error", "create-state"):
+            loader = CustomLoader()
+        elif kind == "legacy":
+            loader = LegacyLoader()
+        elif kind == "subclass":
+            loader = SubclassLoader("trusted_router", origin)
+        spec = spec_from_file_location("trusted_router", origin, loader=loader,
+                                      submodule_search_locations=[sys.argv[1]])
+        if kind == "locationless":
+            spec.has_location = False
+        elif kind == "missing-origin":
+            spec.origin = origin + ".missing"
+        class Finder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "trusted_router":
+                    return spec
+        sys.meta_path.append(Finder())
+        import trusted_router
+        import trustedrouter
+        assert trusted_router is trustedrouter
+    ''', str(real_package), kind) == ""
+
+
+@pytest.mark.parametrize("inspection", ["raises", "unexpected", "none", "execution-error"])
+def test_standard_loader_code_inspection(real_package: Path, inspection: str) -> None:
+    assert run_code('''
+        import sys
+        from importlib.machinery import PathFinder, SourceFileLoader
+        spec = PathFinder.find_spec("trusted_router", [sys.argv[1]])
+        assert type(spec.loader) is SourceFileLoader
+        original = spec.loader.get_code
+        error = RuntimeError("original provider error")
+        calls = []
+        def get_code(name):
+            calls.append(name)
+            if sys.argv[2] == "execution-error":
+                raise error
+            if len(calls) == 1:
+                if sys.argv[2] == "raises":
+                    raise error
+                return object() if sys.argv[2] == "unexpected" else None
+            return original(name)
+        spec.loader.get_code = get_code
+        class Finder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "trusted_router":
+                    return spec
+        sys.meta_path.append(Finder())
+        try:
+            import trusted_router
+        except RuntimeError as exc:
+            assert sys.argv[2] == "execution-error"
+            assert exc is error
+            assert "trusted_router" not in sys.modules
+        else:
+            assert sys.argv[2] != "execution-error"
+            assert trusted_router.marker == "server"
+        assert calls == ["trusted_router", "trusted_router"]
+        assert "trustedrouter" not in sys.modules
+    ''', str(real_package), inspection) == ""
+
+
+@pytest.mark.parametrize("wrapper", ["exec-only", "lazy", "zip"])
+def test_wrapped_shim_before_standard_provider(
+    real_package: Path, tmp_path: Path, wrapper: str,
+) -> None:
+    archive = tmp_path / "second-shim.zip"
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.write(SRC / "trusted_router/__init__.py", "trusted_router/__init__.py")
+    assert run_code('''
+        import sys
+        from importlib.machinery import PathFinder
+        from importlib.util import LazyLoader
+        spec = PathFinder.find_spec("trusted_router", [sys.argv[1]])
+        original = spec.loader
+        class Wrapper:
+            def create_module(self, spec):
+                return None
+            def exec_module(self, module):
+                original.exec_module(module)
+        if sys.argv[3] == "exec-only":
+            spec.loader = Wrapper()
+        elif sys.argv[3] == "lazy":
+            spec.loader = LazyLoader(original)
+        class WrappedFinder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "trusted_router":
+                    return spec
+        class RealFinder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "trusted_router":
+                    return PathFinder.find_spec(fullname, [sys.argv[2]])
+        sys.meta_path.extend([WrappedFinder(), RealFinder()])
+        import trusted_router
+        assert trusted_router.marker == "server"
+        assert "trustedrouter" not in sys.modules
+    ''', str(archive), str(real_package), wrapper) == ""
+
+
+@pytest.mark.parametrize("server", [False, True])
+def test_raising_foreign_finder(real_package: Path, server: bool) -> None:
+    assert run_code('''
+        import sys
+        from importlib.machinery import PathFinder
+        class RaisingFinder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "trusted_router":
+                    raise RuntimeError("foreign discovery failed")
+        class RealFinder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "trusted_router" and sys.argv[2] == "True":
+                    return PathFinder.find_spec(fullname, [sys.argv[1]])
+        sys.meta_path.extend([RaisingFinder(), RealFinder()])
+        import trusted_router
+        if sys.argv[2] == "True":
+            assert trusted_router.marker == "server"
+            assert "trustedrouter" not in sys.modules
+        else:
+            import trustedrouter
+            assert trusted_router is trustedrouter
+    ''', str(real_package), str(server)) == ""
+
+
+@pytest.mark.parametrize("bytecode", [False, True])
+def test_standard_module_metadata(tmp_path: Path, bytecode: bool) -> None:
+    source = tmp_path / "trusted_router.py"
+    source.write_text("marker = 'server'\n")
     assert run_code('''
         import importlib
+        import py_compile
         import sys
-        import types
-        import warnings
-        from importlib.machinery import ModuleSpec
-        class LegacyLoader:
-            def load_module(self, fullname):
-                module = sys.modules.setdefault(fullname, types.ModuleType(fullname))
-                module.marker = "legacy"
-                return module
-        class EditableFinder:
+        from pathlib import Path
+        from importlib.machinery import PathFinder
+        from importlib.util import module_from_spec
+        source = Path(sys.argv[1]) / "trusted_router.py"
+        if sys.argv[2] == "True":
+            py_compile.compile(str(source), cfile=str(source) + "c", doraise=True)
+            source.unlink()
+        sys.path.append(sys.argv[1])
+        expected = PathFinder.find_spec("trusted_router", [sys.argv[1]])
+        control = module_from_spec(expected)
+        expected.loader.exec_module(control)
+        import trusted_router
+        for _ in range(2):
+            assert set(vars(trusted_router)) == set(vars(control))
+            for name in ("__name__", "__file__", "__cached__", "__package__"):
+                assert getattr(trusted_router, name) == getattr(control, name)
+            assert trusted_router.__loader__ is trusted_router.__spec__.loader
+            assert trusted_router.__spec__.origin == expected.origin
+            assert trusted_router.marker == "server"
+            assert importlib.reload(trusted_router) is trusted_router
+        assert "trustedrouter" not in sys.modules
+    ''', str(tmp_path), str(bytecode)) == ""
+
+
+@pytest.mark.parametrize("missing", ["_exec", "_initializing"])
+@pytest.mark.parametrize("server", [False, True])
+def test_missing_importlib_protocol(real_package: Path, missing: str, server: bool) -> None:
+    assert run_code('''
+        import sys
+        from importlib import _bootstrap
+        from importlib.machinery import PathFinder
+        original = _bootstrap._exec
+        class Finder:
             def find_spec(self, fullname, path=None, target=None):
-                if fullname in ("legacy_control", "trusted_router"):
-                    return ModuleSpec(fullname, LegacyLoader(), is_package=True)
-        sys.meta_path.append(EditableFinder())
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ImportWarning)
-            warnings.simplefilter("ignore", DeprecationWarning)
+                if fullname == "trusted_router":
+                    if sys.argv[2] == "_exec":
+                        del _bootstrap._exec
+                    else:
+                        del sys.modules[fullname].__spec__._initializing
+                    if sys.argv[3] == "True":
+                        return PathFinder.find_spec(fullname, [sys.argv[1]])
+        sys.meta_path.append(Finder())
+        try:
             try:
-                import legacy_control
-            except ImportError:
-                print("legacy loaders unsupported")
-            else:
                 import trusted_router
-                assert trusted_router.marker == legacy_control.marker == "legacy"
-                assert importlib.reload(trusted_router) is trusted_router
-    ''') in ("", "legacy loaders unsupported\n")
+            except ImportError as exc:
+                assert sys.argv[3] == "True"
+                assert "trusted_router handoff requires" in str(exc)
+                assert sys.argv[2] in str(exc)
+                assert "trusted_router" not in sys.modules
+                assert "trustedrouter" not in sys.modules
+            else:
+                assert sys.argv[3] == "False"
+                import trustedrouter
+                assert trusted_router is trustedrouter
+        finally:
+            _bootstrap._exec = original
+    ''', str(real_package), missing, str(server)) == ""
+
+
+@pytest.mark.parametrize("server", [False, True])
+def test_zip_provider_is_ignored(real_package: Path, tmp_path: Path, server: bool) -> None:
+    archive = tmp_path / "server.zip"
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("trusted_router/__init__.py", "raise AssertionError('zip provider ran')")
+    code = ("import trusted_router; assert trusted_router.marker == 'server'" if server else
+            "import trusted_router, trustedrouter; assert trusted_router is trustedrouter")
+    paths = [SRC, archive, real_package] if server else [SRC, archive]
+    assert run_python(["-c", code], paths=paths) == ""
 
 
 @pytest.mark.parametrize("module", ["trusted_router", "trusted_router.__main__"])

@@ -24,7 +24,8 @@ pip install trusted-router-py[attestation]     # + GCP attestation verification
 ```
 
 The import name is `trustedrouter`; `trusted_router` is also accepted as an alias.
-If another installed package owns `trusted_router`, that package takes precedence.
+An ordinary source package named `trusted_router` elsewhere on the import path takes
+precedence; other kinds of providers are not detected.
 
 ## Quick start
 
