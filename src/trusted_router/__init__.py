@@ -49,6 +49,9 @@ def _trusted_router_sdk_alias() -> None:
         )
 
     def other_provider() -> ModuleSpec | None:
+        # importlib.reload passes the module being reloaded to every finder.
+        reloading = getattr(sys.modules.get("importlib"), "_RELOADING", {})
+        target = module if reloading.get("trusted_router") is module else None
         finders = list(sys.meta_path)
         if PathFinder not in finders:
             finders.append(PathFinder)
@@ -61,7 +64,7 @@ def _trusted_router_sdk_alias() -> None:
             paths = ([entry] for entry in sys.path if isinstance(entry, str))
             for path in paths if finder is PathFinder else (None,):
                 try:
-                    spec: ModuleSpec | None = discover("trusted_router", path)
+                    spec: ModuleSpec | None = discover("trusted_router", path, target)
                 except Exception:  # noqa: BLE001, S112 -- Foreign discovery is best effort.
                     continue
                 if spec is None or not is_file_provider(spec):

@@ -4,8 +4,10 @@
 
 - Accept `trusted_router` as an alias for `trustedrouter`, sharing the same
   modules and classes under both spellings.
-- An ordinary source package named `trusted_router` elsewhere on the import path takes
-  precedence; other kinds of providers are not detected.
+- An ordinary package or module named `trusted_router` on disk elsewhere on the
+  import path (`.py` source or compiled `.pyc`, loaded by Python's standard file
+  loaders) takes precedence. Zip archives, namespace directories and custom
+  loaders are not detected.
 - Nothing else changed.
 
 ## 0.9.0

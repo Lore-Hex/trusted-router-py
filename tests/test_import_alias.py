@@ -197,6 +197,36 @@ def test_meta_path_provider(real_package: Path) -> None:
     ''', str(real_package)) == ""
 
 
+def test_reload_passes_the_target_to_other_finders(tmp_path: Path) -> None:
+    # A finder may answer differently for a reload (target supplied). With the
+    # alias absent, reload executes its second answer in the same module object.
+    for name in ("first", "second"):
+        package = tmp_path / name / "trusted_router"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text(f"marker = {name!r}\n")
+    assert run_code('''
+        import importlib
+        import sys
+        from importlib.machinery import PathFinder
+        from pathlib import Path
+        root = Path(sys.argv[1])
+        class TargetAwareFinder:
+            @staticmethod
+            def find_spec(fullname, path=None, target=None):
+                if fullname == "trusted_router":
+                    chosen = "first" if target is None else "second"
+                    return PathFinder.find_spec(fullname, [str(root / chosen)])
+        sys.meta_path.append(TargetAwareFinder)
+        import trusted_router
+        assert trusted_router.marker == "first"
+        reloaded = importlib.reload(trusted_router)
+        assert reloaded is trusted_router
+        assert trusted_router.marker == "second"
+        assert Path(trusted_router.__file__).parent.parent.name == "second"
+        assert "trustedrouter" not in sys.modules
+    ''', str(tmp_path)) == ""
+
+
 def test_replaced_path_finder(real_package: Path) -> None:
     assert run_code('''
         import sys

@@ -678,5 +678,12 @@
     "before": "            if reloading.get(\"trusted_router\") is not module:",
     "after": "            if False:",
     "test": "tests/test_import_alias.py::test_missing_importlib_protocol"
+  },
+  {
+    "name": "alias-reload-target",
+    "file": "src/trusted_router/__init__.py",
+    "before": "discover(\"trusted_router\", path, target)",
+    "after": "discover(\"trusted_router\", path)",
+    "test": "tests/test_import_alias.py::test_reload_passes_the_target_to_other_finders"
   }
 ]
