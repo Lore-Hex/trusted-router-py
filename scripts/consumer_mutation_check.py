@@ -50,6 +50,12 @@ def main() -> None:
         count = pytest(root, "tests/test_consumer.py")
         print(f"BASELINE {count} consumer checks passed", flush=True)
         mutations = [
+            ("alias-artifact-stray", "src/trusted_router/stray.txt", None, "scratch must not ship",
+             "tests/test_consumer.py::test_artifact_listing", True),
+            ("alias-wheel-omitted", "pyproject.toml",
+             'packages = ["src/trustedrouter", "src/trusted_router"]',
+             'packages = ["src/trustedrouter"]',
+             "tests/test_consumer.py::test_artifact_listing", False),
             ("artifact-stray", "src/trustedrouter/stray.txt", None, "scratch must not ship",
              "tests/test_consumer.py::test_artifact_listing", True),
             ("metadata-keywords", "pyproject.toml", '"trustedrouter", "llm", "sdk"',

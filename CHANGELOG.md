@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0
+
+- Accept `trusted_router` as an alias for `trustedrouter`, sharing the same
+  modules and classes under both spellings.
+- Step aside for any other `trusted_router` package, including editable
+  installs that appear after the SDK on the import path.
+- Nothing else changed.
+
 ## 0.9.0
 
 - `verify_gateway_attestation_document(document, policy=..., nonce_hex=...)`:

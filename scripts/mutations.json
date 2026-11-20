@@ -538,5 +538,26 @@
     "before": "        elif tls_cert_der is not None:\n            binding = \"tls-cert\"",
     "after": "        else:\n            binding = \"tls-cert\"",
     "test": "tests/test_attestation_document.py::test_a_claimed_certificate_with_no_connection_evidence_reports_none"
+  },
+  {
+    "name": "alias-step-aside",
+    "file": "src/trusted_router/__init__.py",
+    "before": "_provider = _other_provider()",
+    "after": "_provider = None",
+    "test": "tests/test_import_alias.py::test_step_aside"
+  },
+  {
+    "name": "alias-module-identity",
+    "file": "src/trusted_router/__init__.py",
+    "before": "        sys.modules[module.__name__] = import_module(self.canonical.name)",
+    "after": "        from importlib.machinery import SourceFileLoader\n        SourceFileLoader(module.__name__, self.canonical.origin).exec_module(module)",
+    "test": "tests/test_import_alias.py::test_module_identity"
+  },
+  {
+    "name": "alias-namespace-directory",
+    "file": "src/trusted_router/__init__.py",
+    "before": "        if spec is None or _is_namespace(spec):",
+    "after": "        if spec is None:",
+    "test": "tests/test_import_alias.py::test_namespace_directory_does_not_hide_the_sdk"
   }
 ]
