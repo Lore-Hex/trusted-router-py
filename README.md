@@ -23,6 +23,11 @@ pip install trusted-router-py                  # base client
 pip install trusted-router-py[attestation]     # + GCP attestation verification
 ```
 
+The import name is `trustedrouter`; `trusted_router` is also accepted as an alias.
+An ordinary package or module named `trusted_router` on disk elsewhere on the import
+path (`.py` source or compiled `.pyc`, loaded by Python's standard file loaders) takes
+precedence. Zip archives, namespace directories and custom loaders are not detected.
+
 ## Quick start
 
 ```python

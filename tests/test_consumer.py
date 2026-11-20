@@ -25,7 +25,11 @@ SOURCES = {
     "_retry.py", "_routing.py", "_sse.py", "_telemetry.py", "_transport.py",
     "attestation.py", "client.py", "models.py", "oauth.py", "py.typed", "receipts.py", "session.py",
 }
-DIST = "trusted_router_py-0.9.0"
+ALIAS_SOURCES = {
+    "__init__.py", "py.typed", "attestation.pyi", "client.pyi", "models.pyi", "oauth.pyi",
+    "receipts.pyi", "session.pyi",
+}
+DIST = "trusted_router_py-0.10.0"
 UV = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
 
 
@@ -92,6 +96,8 @@ def test_artifact_listing(installed: Installed, artifact: str) -> None:
         with zipfile.ZipFile(installed.wheel) as wheel:
             names = wheel.namelist()
         expected = {f"trustedrouter/{name}" for name in SOURCES} | {
+            f"trusted_router/{name}" for name in ALIAS_SOURCES
+        } | {
             f"{DIST}.dist-info/{name}" for name in
             ("METADATA", "WHEEL", "RECORD", "entry_points.txt", "licenses/LICENSE")
         }
@@ -99,6 +105,8 @@ def test_artifact_listing(installed: Installed, artifact: str) -> None:
         with tarfile.open(installed.sdist) as sdist:
             names = [entry.name for entry in sdist if entry.isfile()]
         expected = {f"{DIST}/src/trustedrouter/{name}" for name in SOURCES} | {
+            f"{DIST}/src/trusted_router/{name}" for name in ALIAS_SOURCES
+        } | {
             f"{DIST}/{name}" for name in
             (".gitignore", "LICENSE", "README.md", "pyproject.toml", "PKG-INFO")
         }
@@ -148,6 +156,64 @@ def test_scratch_consumer(installed: Installed) -> None:
     assert result.stdout == "installed consumer passed\n"
 
 
+def test_installed_alias(installed: Installed) -> None:
+    require_success(installed.call([installed.python, "-c", """
+import importlib
+import trusted_router
+import trustedrouter
+assert trusted_router is trustedrouter
+for name in ('client', 'models', 'attestation', '__main__'):
+    assert importlib.import_module('trusted_router.' + name) is importlib.import_module(
+        'trustedrouter.' + name)
+"""]))
+    # Reproduce an editable server path following the wheel's site-packages.
+    server = installed.root / "server-src"
+    package = server / "trusted_router"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("marker = 'server'\n")
+    (package / "serve.py").write_text("marker = 'serve'\n")
+    require_success(installed.call([installed.python, "-c", """
+import sys
+from pathlib import Path
+sys.path.append(sys.argv[1])
+import trusted_router.serve
+import trustedrouter
+assert trusted_router.marker == 'server'
+assert trusted_router.serve.marker == 'serve'
+assert Path(trusted_router.__file__).parent == Path(sys.argv[1]) / 'trusted_router'
+assert trustedrouter.TrustedRouter
+""", str(server)]))
+
+
+def test_installed_alias_typing(installed: Installed) -> None:
+    source = installed.root / "alias_typing.py"
+    source.write_text('''
+from trusted_router import TrustedRouter, AsyncTrustedRouter, ChatMessage
+from trustedrouter import TrustedRouter as Canonical
+from trusted_router.models import ChatMessage as AliasMessage
+from trusted_router.client import TrustedRouter as AliasClient
+from trusted_router.attestation import AttestationVerificationError
+from trusted_router.oauth import create_pkce_pair
+from trusted_router.receipts import ReceiptCapture
+from trusted_router.session import verify_gateway_session
+
+message: ChatMessage = AliasMessage(role="user", content="hello")
+alias_client: Canonical = AliasClient(api_key="fake")
+reveal_type(message)
+
+client: Canonical = TrustedRouter(api_key="fake")
+reveal_type(TrustedRouter(api_key="fake"))
+reveal_type(AsyncTrustedRouter(api_key="fake"))
+reveal_type(ChatMessage(role="user", content="hello"))
+''')
+    result = installed.call([installed.python, "-m", "mypy", "--strict", str(source)],
+                            env={"PYTHONPATH": "", "MYPYPATH": ""})
+    require_success(result)
+    assert 'Revealed type is "trustedrouter._client_sync.TrustedRouter"' in result.stdout
+    assert 'Revealed type is "trustedrouter._client_async.AsyncTrustedRouter"' in result.stdout
+    assert 'Revealed type is "trustedrouter.models.ChatMessage"' in result.stdout
+
+
 @dataclass
 class Case:
     name: str
@@ -160,8 +226,8 @@ class Case:
 
 
 CASES = [
-    Case("version", ["--version"], "trustedrouter 0.9.0"),
-    Case("version-json", ["--json", "--version"], "0.9.0", command="version"),
+    Case("version", ["--version"], "trustedrouter 0.10.0"),
+    Case("version-json", ["--json", "--version"], "0.10.0", command="version"),
     Case("unknown", ["--json", "unknown"], "usage_error", 2),
     Case("missing-command", ["--json"], "usage_error", 2),
     Case("retries-invalid", ["--json", "--retries", "-1", "models"], "usage_error", 2),

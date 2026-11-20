@@ -113,7 +113,7 @@ def findings(path: Path) -> list[str]:
 
 
 def main() -> int:
-    paths = [Path(arg) for arg in sys.argv[1:]] or sorted(Path("src/trustedrouter").glob("*.py"))
+    paths = [Path(arg) for arg in sys.argv[1:]] or sorted(Path("src").rglob("*.py"))
     errors = [message for path in paths for message in findings(path)]
     if errors:
         print("\n".join(errors))
