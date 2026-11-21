@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add metadata-only PyPI aliases `trustedrouter` and `trusted-router` that install
+  `trusted-router-py>=0.10.0`, forwarding the `attestation` and `receipts` extras.
+
 ## 0.10.0
 
 - Accept `trusted_router` as an alias for `trustedrouter`, sharing the same
