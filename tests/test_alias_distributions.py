@@ -1,4 +1,4 @@
-"""PyPI aliases install the SDK without owning any of its files or commands."""
+"""The PyPI alias installs the SDK without owning any of its files or commands."""
 from __future__ import annotations
 
 import os
@@ -21,29 +21,26 @@ else:
     import tomli as tomllib  # type: ignore[import-not-found]
 
 ROOT = Path(__file__).resolve().parents[1]
-ALIASES = ("trustedrouter", "trusted-router")
+ALIAS = "trustedrouter"
 
 
 def test_alias_versions() -> None:
     root = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    versions = set()
-    for name in ALIASES:
-        project = tomllib.loads(
-            (ROOT / "aliases" / name / "pyproject.toml").read_text()
-        )["project"]
-        versions.add(project["version"])
-        assert project["urls"] == root["urls"]
-        dependencies = [*project["dependencies"], *(
-            dependency for extra in project["optional-dependencies"].values()
-            for dependency in extra
-        )]
-        for dependency in dependencies:
-            requirement = Requirement(dependency)
-            assert requirement.name == "trusted-router-py"
-            (floor,) = requirement.specifier
-            assert floor.operator == ">="
-            assert Version(floor.version) <= Version(root["version"])
-    assert versions == {"0.10.0"}
+    project = tomllib.loads(
+        (ROOT / "aliases" / ALIAS / "pyproject.toml").read_text()
+    )["project"]
+    assert project["urls"] == root["urls"]
+    dependencies = [*project["dependencies"], *(
+        dependency for extra in project["optional-dependencies"].values()
+        for dependency in extra
+    )]
+    for dependency in dependencies:
+        requirement = Requirement(dependency)
+        assert requirement.name == "trusted-router-py"
+        (floor,) = requirement.specifier
+        assert floor.operator == ">="
+        assert Version(floor.version) <= Version(root["version"])
+    assert project["version"] == "0.10.0"
 
 
 def build_alias(name: str, destination: Path) -> None:
@@ -69,23 +66,22 @@ def build_alias(name: str, destination: Path) -> None:
             pytest.skip(f"Cannot obtain the hatchling build backend: {output}")
 
 
-@pytest.mark.parametrize("name", ALIASES)
-def test_alias_distribution(name: str, tmp_path: Path) -> None:
+def test_alias_distribution(tmp_path: Path) -> None:
     # The release workflow checks the exact artifacts that will be uploaded.
     artifact_dir = os.environ.get("ALIAS_DIST_DIR")
     destination = ROOT / artifact_dir if artifact_dir else tmp_path / "dist"
     if not artifact_dir:
-        build_alias(name, destination)
+        build_alias(ALIAS, destination)
     (wheel_path,) = destination.glob("*.whl")
     (sdist_path,) = destination.glob("*.tar.gz")
-    dist = f"{name.replace('-', '_')}-0.10.0"
+    dist = f"{ALIAS}-0.10.0"
     with zipfile.ZipFile(wheel_path) as wheel:
         names = wheel.namelist()
         assert names
         assert all(path.startswith(f"{dist}.dist-info/") for path in names)
         assert not any(Path(path).name == "entry_points.txt" for path in names)
         metadata = BytesParser().parsebytes(wheel.read(f"{dist}.dist-info/METADATA"))
-    assert metadata["Name"] == name
+    assert metadata["Name"] == ALIAS
     assert metadata["Version"] == "0.10.0"
     assert metadata["Requires-Python"] == ">=3.10"
     assert metadata["License-Expression"] == "Apache-2.0"

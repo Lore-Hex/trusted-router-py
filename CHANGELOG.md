@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add metadata-only PyPI aliases `trustedrouter` and `trusted-router` that install
+- Published the metadata-only alias `trustedrouter` 0.10.0 on PyPI. It installs
   `trusted-router-py>=0.10.0`, forwarding the `attestation` and `receipts` extras.
 
 ## 0.10.0
