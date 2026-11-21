@@ -23,7 +23,7 @@ pip install trusted-router-py                  # base client
 pip install trusted-router-py[attestation]     # + GCP attestation verification
 ```
 
-`pip install trustedrouter` and `pip install trusted-router` are aliases that install the same SDK.
+`pip install trustedrouter` is an alias that installs the same SDK.
 
 The import name is `trustedrouter`; `trusted_router` is also accepted as an alias.
 An ordinary package or module named `trusted_router` on disk elsewhere on the import
