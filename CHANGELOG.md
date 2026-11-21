@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.10.1
 
-- Published the metadata-only alias `trustedrouter` 0.10.0 on PyPI. It installs
-  `trusted-router-py>=0.10.0`, forwarding the `attestation` and `receipts` extras.
+- Renamed the SDK distribution to `trustedrouter`; `trusted-router-py` is
+  retired and no longer installable. No API changes.
+- `trustedrouter` 0.10.0 was a broken metadata-only alias and should not be used.
+  Install `trustedrouter>=0.10.1` for the real SDK.
 
 ## 0.10.0
 

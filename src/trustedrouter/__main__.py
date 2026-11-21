@@ -625,7 +625,7 @@ def _build_parser(*, json_mode: bool = False) -> argparse.ArgumentParser:
                      help="Send a fresh nonce and verify the document's signature, "
                           "workload identity, and nonce echo; not bound to the TLS "
                           "connection (binding \"none\"). Requires "
-                          "`pip install trusted-router-py[attestation]`.")
+                          "`pip install trustedrouter[attestation]`.")
     att.add_argument("--session", action="store_true",
                      help="Verify the G6 TLS-exporter binding and keep-alive pin.")
     att.add_argument("--connect-ip", default=None,

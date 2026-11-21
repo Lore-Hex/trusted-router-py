@@ -1,6 +1,6 @@
 [project]
-name = "trusted-router-py"
-version = "0.10.0"
+name = "trustedrouter"
+version = "0.10.1"
 description = "Official Python SDK and CLI for TrustedRouter."
 readme = "README.md"
 requires-python = ">=3.10"
