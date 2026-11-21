@@ -1,0 +1,60 @@
+name: Release alias to PyPI
+
+# Configure a PyPI pending trusted publisher for EACH project name:
+#   PyPI project name : trustedrouter / trusted-router (separate publishers)
+#   Owner             : Lore-Hex
+#   Repository        : trusted-router-py
+#   Workflow filename : release-aliases.yml
+#   Environment       : pypi
+# https://pypi.org/manage/account/publishing/
+on:
+  workflow_dispatch:
+    inputs:
+      distribution:
+        description: Alias distribution to publish
+        required: true
+        type: choice
+        options:
+          - trustedrouter
+          - trusted-router
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DISTRIBUTION: ${{ inputs.distribution }}
+      ALIAS_DIST_DIR: dist/${{ inputs.distribution }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync --group dev
+      - run: uv build "aliases/$DISTRIBUTION" --out-dir "$ALIAS_DIST_DIR"
+      - name: Verify alias artifacts and version floors
+        run: |
+          uv run pytest -o addopts= \
+            "tests/test_alias_distributions.py::test_alias_distribution[$DISTRIBUTION]" \
+            tests/test_alias_distributions.py::test_alias_versions
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ inputs.distribution }}
+          path: dist/${{ inputs.distribution }}/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ inputs.distribution }}
+          path: dist/${{ inputs.distribution }}/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/${{ inputs.distribution }}/
+          # No `password:` — uses GitHub OIDC + PyPI's trusted publisher.
