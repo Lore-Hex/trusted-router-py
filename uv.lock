@@ -983,8 +983,8 @@ wheels = [
 ]
 
 [[package]]
-name = "trusted-router-py"
-version = "0.10.0"
+name = "trustedrouter"
+version = "0.10.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

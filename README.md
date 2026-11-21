@@ -1,9 +1,9 @@
 # TrustedRouter Python SDK
 
-[![PyPI version](https://img.shields.io/pypi/v/trusted-router-py?logo=pypi)](https://pypi.org/project/trusted-router-py/)
-[![Python versions](https://img.shields.io/pypi/pyversions/trusted-router-py?logo=python)](https://pypi.org/project/trusted-router-py/)
+[![PyPI version](https://img.shields.io/pypi/v/trustedrouter?logo=pypi)](https://pypi.org/project/trustedrouter/)
+[![Python versions](https://img.shields.io/pypi/pyversions/trustedrouter?logo=python)](https://pypi.org/project/trustedrouter/)
 [![CI](https://github.com/Lore-Hex/trusted-router-py/actions/workflows/ci.yml/badge.svg)](https://github.com/Lore-Hex/trusted-router-py/actions/workflows/ci.yml)
-[![Typed with Pydantic](https://img.shields.io/badge/types-pydantic-e92063)](https://pypi.org/project/trusted-router-py/)
+[![Typed with Pydantic](https://img.shields.io/badge/types-pydantic-e92063)](https://pypi.org/project/trustedrouter/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Verifiable trust](https://img.shields.io/badge/trust-attested-16a34a)](https://trust.trustedrouter.com)
 
@@ -18,12 +18,13 @@ Mistral, Cerebras) and *prove* the prompt path doesn't log.
 - Source: `https://github.com/Lore-Hex/trusted-router-py`
 - License: Apache-2.0
 
-```bash
-pip install trusted-router-py                  # base client
-pip install trusted-router-py[attestation]     # + GCP attestation verification
-```
+The PyPI package is `trustedrouter`. The former name `trusted-router-py` is
+retired and no longer installable.
 
-`pip install trustedrouter` is an alias that installs the same SDK.
+```bash
+pip install trustedrouter                  # base client
+pip install trustedrouter[attestation]     # + GCP attestation verification
+```
 
 The import name is `trustedrouter`; `trusted_router` is also accepted as an alias.
 An ordinary package or module named `trusted_router` on disk elsewhere on the import
@@ -425,7 +426,7 @@ or `trustedrouter attest --session`; a certificate from a separate connection
 does not establish that binding.
 
 This codepath needs `cryptography`; install with
-`pip install trusted-router-py[attestation]`.
+`pip install trustedrouter[attestation]`.
 
 ## Receipt verification
 
@@ -479,9 +480,9 @@ agents, CI jobs, and gateway diagnostics. Install it into an isolated tool
 environment, or use the console script from your existing SDK environment:
 
 ```bash
-pipx install trusted-router-py
-# or: uv tool install trusted-router-py
-# or: pip install trusted-router-py
+pipx install trustedrouter
+# or: uv tool install trustedrouter
+# or: pip install trustedrouter
 ```
 
 Authentication comes from `TRUSTEDROUTER_API_KEY`, with `TR_API_KEY` retained
@@ -508,7 +509,7 @@ trustedrouter --version
 ```
 
 The raw `attest` command is available in the base install. Install
-`trusted-router-py[attestation]` to use `attest --verify` or
+`trustedrouter[attestation]` to use `attest --verify` or
 `attest --session`. `--verify` sends a fresh nonce and checks the document's
 signature, workload identity, and nonce echo against the published trust
 release; like `verify_gateway_attestation_document()`, it reports

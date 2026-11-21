@@ -176,7 +176,7 @@ def _user_agent() -> str:
     try:
         from importlib.metadata import version as _v
 
-        v = _v("trusted-router-py")
+        v = _v("trustedrouter")
     except PackageNotFoundError:
         v = "unknown"
     py = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"

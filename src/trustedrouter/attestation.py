@@ -26,7 +26,7 @@ caller can check, and every result reports that as `binding` (see
     that cannot see the TLS connection at all.
 
 The verification uses the `cryptography` library which is shipped as
-an optional extra: `pip install trusted-router-py[attestation]`. The
+an optional extra: `pip install trustedrouter[attestation]`. The
 base SDK doesn't pull it because most users only want chat completions
 and shouldn't pay the install cost.
 """
@@ -307,7 +307,7 @@ def _verify_rs256(
     except ImportError as exc:  # pragma: no cover — dep missing path
         raise AttestationVerificationError(
             "attestation verification requires the `cryptography` package; "
-            "install with `pip install trusted-router-py[attestation]`"
+            "install with `pip install trustedrouter[attestation]`"
         ) from exc
 
     if header.get("alg") != "RS256":

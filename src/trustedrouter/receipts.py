@@ -291,7 +291,7 @@ def _verify_signature(envelope: _JWSEnvelope, public_key: bytes) -> bytes:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise ReceiptSignatureError(
-            "Ed25519 signature check failed: install trusted-router-py[receipts]"
+            "Ed25519 signature check failed: install trustedrouter[receipts]"
         ) from exc
     signing_input = f"{envelope.protected}.{envelope.payload}".encode("ascii")
     try:

@@ -1,5 +1,6 @@
 """Standalone, strictly typed consumer of the installed public API."""
 import asyncio
+from importlib.metadata import version
 
 import httpx
 
@@ -9,6 +10,7 @@ from trustedrouter import (
     ChatCompletion,
     ProviderPreferences,
     TrustedRouter,
+    __version__,
     create_oauth_authorization,
     fusion_tool,
 )
@@ -16,6 +18,9 @@ from trustedrouter import (
 
 def respond(request: httpx.Request) -> httpx.Response:
     assert request.url.path == "/v1/chat/completions"
+    installed_version = version("trustedrouter")
+    assert installed_version == __version__ == "0.10.1"
+    assert request.headers["user-agent"].split()[0] == f"trusted-router-py/{installed_version}"
     return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=(
         b'data: {"id":"consumer","choices":[{"index":0,"delta":'
         b'{"role":"assistant","content":"hello consumer"},"finish_reason":"stop"}]}\n\n'

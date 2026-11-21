@@ -112,7 +112,7 @@ def sdk_identity() -> dict[str, str]:
     try:
         from importlib.metadata import version
 
-        sdk_version = version("trusted-router-py")
+        sdk_version = version("trustedrouter")
     except PackageNotFoundError:
         sdk_version = "0.0.0"
     if len(sdk_version) > 32 or _SEMVER_RE.fullmatch(sdk_version) is None:
