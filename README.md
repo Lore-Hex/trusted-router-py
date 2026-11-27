@@ -64,9 +64,17 @@ from trustedrouter import ProviderPreferences
 response = client.chat_completions(
     model="z-ai/glm-5.2",
     messages=[{"role": "user", "content": "Review this contract."}],
-    provider=ProviderPreferences.confidential(),
+    provider=ProviderPreferences.zdr(),
 )
 ```
+
+For Confidential or Trusted inference, install `trustedrouter[attestation]` and pass
+`gateway_policy=AttestationPolicy(expected_image_digest=...)` when constructing the
+client. Supply a reviewed production GCP image digest, including its `sha256:` prefix.
+Then select `ProviderPreferences.confidential()` or the Trusted alias. The SDK verifies
+the gateway on the same TLS connection before each inference attempt sends your key or
+prompt. This transport verifies GCP Confidential Space only; it does not silently fall
+back to ordinary HTTPS on AWS or Azure. The serving gateway enforces the upstream tier.
 
 TrustedRouter's five atomic orchestration primitives have typed builders with
 the same wire format in every official SDK: `fusion_tool` (Synth),

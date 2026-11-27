@@ -73,6 +73,9 @@ from trustedrouter.models import (
     TrustRelease,
 )
 
+from ._verified_transport import VerifiedClient, VerifiedTransport
+from .attestation import AttestationPolicy
+
 
 class TrustedRouter:
     def __init__(
@@ -85,6 +88,7 @@ class TrustedRouter:
         headers: Mapping[str, str] | None = None,
         workspace_id: str | None = None,
         client: httpx.Client | None = None,
+        gateway_policy: AttestationPolicy | None = None,
         max_retries: int = 2,
         regional_failover: bool = True,
         telemetry: bool | None = None,
@@ -156,6 +160,13 @@ class TrustedRouter:
         # Auth and request hooks, which are the only writers the per-attempt
         # scrub above cannot see. Marked SDK requests only.
         _install_reserved_header_hook(self._client, is_async=False)
+        self._verified = (
+            VerifiedClient(transport=VerifiedTransport(gateway_policy), timeout=timeout,
+                              headers=default_headers, trust_env=False, follow_redirects=False)
+            if gateway_policy is not None else None
+        )
+        if self._verified is not None:
+            _install_reserved_header_hook(self._verified, is_async=False)
         self._pool = BaseUrlPool(
             lambda: self._client,
             self.base_url,
@@ -166,6 +177,8 @@ class TrustedRouter:
     def close(self) -> None:
         if self._owns_telemetry_reporter and isinstance(self._telemetry_sink, TelemetryReporter):
             self._telemetry_sink.close()
+        if self._verified is not None:
+            self._verified.close()
         if self._owns_client:
             self._client.close()
 
@@ -275,8 +288,9 @@ class TrustedRouter:
             if _base_url is None
             else None
         )
+        transport = (self._verified or self._client) if _base_url is None else self._client
         return _json_or_raise(
-            request_with_retry(self._client, controller, method, path, kwargs, recorder=recorder)
+            request_with_retry(transport, controller, method, path, kwargs, recorder=recorder)
         )
 
     def _control_request(
@@ -378,7 +392,7 @@ class TrustedRouter:
             timeout=timeout,
         )
         yield from stream_events(
-            self._client,
+            self._verified or self._client,
             self._inference_controller(),
             build_request,
             iter_body,
@@ -426,7 +440,7 @@ class TrustedRouter:
             timeout=timeout,
         )
         yield from stream_events(
-            self._client,
+            self._verified or self._client,
             self._inference_controller(),
             build_request,
             iter_body,
@@ -471,7 +485,7 @@ class TrustedRouter:
         )
         chunks = list(
             stream_events(
-                self._client,
+                self._verified or self._client,
                 self._inference_controller(),
                 build_request,
                 _iter_sse_chunks,
@@ -729,7 +743,7 @@ class TrustedRouter:
             timeout=timeout,
         )
         yield from stream_events(
-            self._client,
+            self._verified or self._client,
             self._inference_controller(),
             build_request,
             _iter_sse_events,
@@ -777,7 +791,7 @@ class TrustedRouter:
             timeout=timeout,
         )
         yield from stream_events(
-            self._client,
+            self._verified or self._client,
             self._inference_controller(),
             build_request,
             iter_body,

@@ -19,7 +19,7 @@ from trustedrouter import (
 def respond(request: httpx.Request) -> httpx.Response:
     assert request.url.path == "/v1/chat/completions"
     installed_version = version("trustedrouter")
-    assert installed_version == __version__ == "0.10.1"
+    assert installed_version == __version__ == "0.11.0"
     assert request.headers["user-agent"].split()[0] == f"trusted-router-py/{installed_version}"
     return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=(
         b'data: {"id":"consumer","choices":[{"index":0,"delta":'
@@ -32,7 +32,7 @@ with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
     with TrustedRouter(api_key="fake", client=transport, telemetry=False) as client:
         response: ChatCompletion = client.chat_completions(
             model=AUTO_MODEL, messages=[{"role": "user", "content": "hello"}],
-            provider=ProviderPreferences.confidential(),
+            provider=ProviderPreferences.zdr(),
         )
         content: str | None = response.choices[0].message.content
         assert content == "hello consumer"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime as dt
 import hashlib
@@ -22,7 +23,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import trustedrouter.session as tr_session
-from trustedrouter.attestation import GCP_ISSUER, AttestationPolicy, GatewayAttestation
+from trustedrouter import AsyncTrustedRouter, TrustedRouter
+from trustedrouter.attestation import (
+    GCP_ISSUER,
+    AttestationPolicy,
+    AttestationVerificationError,
+    GatewayAttestation,
+)
 
 
 def _b64url(data: bytes) -> str:
@@ -239,6 +246,17 @@ def test_read_http_response_rejects_duplicate_framing_headers(
         match="malformed attestation response: duplicate framing header",
     ):
         _read_fake_http_response(response, monkeypatch)
+
+
+@pytest.mark.parametrize("raw", [
+    b"HTTP/1.1 200 OK\r\nX-Test: " + b"a" * 65536,
+    b"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n",
+    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n",
+    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra",
+])
+def test_attestation_framing_before_connection_reuse(raw, monkeypatch) -> None:
+    with pytest.raises(AttestationVerificationError):
+        _read_fake_http_response(raw, monkeypatch)
 
 
 def test_ssl_call_retries_want_read_and_want_write(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -481,11 +499,13 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
     cert_sha = hashlib.sha256(leaf_der).hexdigest()
     signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     jwks = {"keys": [_public_jwk(signing_key)]}
+    digest = "sha256:" + "a" * 64
     policy = AttestationPolicy(
-        expected_image_digest="sha256:loopback",
+        expected_image_digest=digest,
         expected_image_reference="localhost/trustedrouter:test",
     )
     server_exporters: list[bytes] = []
+    post_exporters: list[bytes] = []
     server_errors: list[BaseException] = []
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -523,7 +543,7 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
                 "hwmodel": "GCP_AMD_SEV",
                 "submods": {
                     "container": {
-                        "image_digest": "sha256:loopback",
+                        "image_digest": digest,
                         "image_reference": "localhost/trustedrouter:test",
                     }
                 },
@@ -569,7 +589,26 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
 
                     request_line = bytes(request).split(b"\r\n", 1)[0].decode("ascii")
                     method, target, _version = request_line.split(" ", 2)
+                    if method == "POST":
+                        assert served == 1 and target == "/v1/chat/completions"
+                        header, _, content = bytes(request).partition(b"\r\n\r\n")
+                        assert b"authorization: bearer synthetic" in header.lower()
+                        n = int(next(line.split(b":", 1)[1] for line in header.lower().splitlines()
+                                     if line.startswith(b"content-length:")))
+                        while len(content) < n:
+                            content += tr_session._ssl_call(
+                                raw, lambda: conn.recv(65536), timeout=5, what="test request body"
+                            )
+                        assert json.loads(content)["messages"][0]["content"] == "synthetic"
+                        post_exporters.append(exporter)
+                        sse = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+                        tr_session._ssl_send_all(
+                            raw, conn, _http_response(sse, connection="close"),
+                            deadline=time.monotonic()+5, what="loopback chat",
+                        )
+                        return
                     assert method == "GET"
+                    assert b"authorization:" not in bytes(request).lower()
                     query = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)
                     nonce_hex = query["nonce"][0]
                     body = _make_jwt(signing_key, claims_for(nonce_hex, exporter))
@@ -593,7 +632,7 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
                 _close_pyopenssl_connection(conn)
 
         port = 9443
-        socket_pairs = [socket.socketpair(), socket.socketpair()]
+        socket_pairs = [socket.socketpair() for _ in range(6)]
         pending_clients = [client for client, _server in socket_pairs]
         server_sockets = [server for _client, server in socket_pairs]
 
@@ -601,7 +640,7 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
             target: tuple[str, int],
             timeout: float,
         ) -> socket.socket:
-            assert target == ("127.0.0.1", port)
+            assert target in {("127.0.0.1", port), ("localhost", port)}
             assert timeout == 5.0
             if not pending_clients:
                 raise AssertionError("unexpected loopback client connection")
@@ -648,6 +687,35 @@ def test_verify_gateway_session_loopback_binds_same_tls_exporter(
                 assert second.exporter != first.exporter
             finally:
                 _close_pyopenssl_connection(second.connection)
+
+            monkeypatch.setattr("trustedrouter.attestation._fetch_jwks", lambda _: jwks)
+            kwargs: dict[str, Any] = {
+                "base_url": f"https://localhost:{port}/v1", "api_key": "synthetic",
+                "max_retries": 0, "timeout": 5.0, "telemetry": False,
+            }
+            chat: dict[str, Any] = {"model": "nyte/trusted",
+                                    "messages": [{"role": "user", "content": "synthetic"}]}
+            wrong = AttestationPolicy(expected_image_digest="sha256:" + "b" * 64)
+            for pin in (policy, wrong):
+                with TrustedRouter(gateway_policy=pin, **kwargs) as client:
+                    if pin is wrong:
+                        with pytest.raises(AttestationVerificationError):
+                            list(client.chat_completions_stream(**chat))
+                    else:
+                        assert list(client.chat_completions_stream(**chat)) == ["ok"]
+
+            async def async_chat() -> None:
+                for pin in (policy, wrong):
+                    async with AsyncTrustedRouter(gateway_policy=pin, **kwargs) as client:
+                        if pin is wrong:
+                            with pytest.raises(AttestationVerificationError):
+                                _ = [s async for s in client.chat_completions_stream(**chat)]
+                        else:
+                            chunks = [s async for s in client.chat_completions_stream(**chat)]
+                            assert chunks == ["ok"]
+
+            asyncio.run(async_chat())
+            assert post_exporters == [server_exporters[2], server_exporters[4]]
         finally:
             for raw in pending_clients:
                 with suppress(Exception):

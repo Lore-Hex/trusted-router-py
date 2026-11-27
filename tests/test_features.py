@@ -707,8 +707,13 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         session_id="matter_456",
         trace={"source": "eval"},
         tags={"team": "legal"},
-        provider=ProviderPreferences.confidential(),
+        provider=ProviderPreferences.zdr(),
     )
+    with pytest.raises(ValueError, match="image-pinned gateway_policy"):
+        sdk.embeddings(
+            model="text-embed", input="private", provider=ProviderPreferences.confidential()
+        )
+    assert len(bodies) == 2
     sdk.close()
 
     assert bodies[0] == {"model": "text-embed", "input": "hello"}
@@ -721,7 +726,7 @@ def test_sync_embeddings_only_sends_provided_optional_fields() -> None:
         "session_id": "matter_456",
         "trace": {"source": "eval"},
         "tags": {"team": "legal"},
-        "provider": {"min_privacy": "confidential", "data_collection": "deny"},
+        "provider": {"min_privacy": "zdr", "data_collection": "deny"},
     }
 
 

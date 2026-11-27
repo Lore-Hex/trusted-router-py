@@ -23,13 +23,14 @@ SOURCES = {
     "__init__.py", "__main__.py", "_client_async.py", "_client_sync.py", "_collect.py",
     "_constants.py", "_errors.py", "_headers.py", "_orchestration.py", "_requests.py",
     "_retry.py", "_routing.py", "_sse.py", "_telemetry.py", "_transport.py",
+    "_verified_transport.py",
     "attestation.py", "client.py", "models.py", "oauth.py", "py.typed", "receipts.py", "session.py",
 }
 ALIAS_SOURCES = {
     "__init__.py", "py.typed", "attestation.pyi", "client.pyi", "models.pyi", "oauth.pyi",
     "receipts.pyi", "session.pyi",
 }
-DIST = "trustedrouter-0.10.1"
+DIST = "trustedrouter-0.11.0"
 UV = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
 
 
@@ -120,7 +121,7 @@ def test_artifact_metadata(installed: Installed) -> None:
     with zipfile.ZipFile(installed.wheel) as wheel:
         metadata = BytesParser().parsebytes(wheel.read(f"{DIST}.dist-info/METADATA"))
         assert metadata["Name"] == "trustedrouter"
-        assert metadata["Version"] == "0.10.1"
+        assert metadata["Version"] == "0.11.0"
         assert set(metadata.get_all("Provides-Extra", [])) == {"attestation", "receipts"}
         assert wheel.read(f"{DIST}.dist-info/entry_points.txt").decode() == (
             "[console_scripts]\ntrustedrouter = trustedrouter.__main__:main\n"
@@ -195,7 +196,7 @@ def test_installed_telemetry_version(installed: Installed) -> None:
     require_success(installed.call([installed.python, "-c", """
 from importlib.metadata import version
 from trustedrouter._telemetry import sdk_identity
-assert sdk_identity()['version'] == version('trustedrouter') == '0.10.1'
+assert sdk_identity()['version'] == version('trustedrouter') == '0.11.0'
 """]))
 
 
@@ -240,8 +241,8 @@ class Case:
 
 
 CASES = [
-    Case("version", ["--version"], "trustedrouter 0.10.1"),
-    Case("version-json", ["--json", "--version"], "0.10.1", command="version"),
+    Case("version", ["--version"], "trustedrouter 0.11.0"),
+    Case("version-json", ["--json", "--version"], "0.11.0", command="version"),
     Case("unknown", ["--json", "unknown"], "usage_error", 2),
     Case("missing-command", ["--json"], "usage_error", 2),
     Case("retries-invalid", ["--json", "--retries", "-1", "models"], "usage_error", 2),

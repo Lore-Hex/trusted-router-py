@@ -45,10 +45,7 @@ from typing import Any, Literal
 
 import httpx as httpx
 
-from trustedrouter.client import (
-    DEFAULT_TRUST_RELEASE_URL,
-    fetch_trust_release,
-)
+from trustedrouter._constants import DEFAULT_TRUST_RELEASE_URL
 from trustedrouter.models import TrustRelease
 
 GCP_ISSUER = "https://confidentialcomputing.googleapis.com"
@@ -213,7 +210,11 @@ def policy_from_trust_release(
     """Build a policy by reading the published trust release. If
     `release` isn't provided, fetches it from `trust_release_url`. The
     audience defaults to "quill-cloud" — the gateway hard-codes this."""
-    release_obj = release if release is not None else fetch_trust_release(trust_release_url)
+    if release is None:
+        from trustedrouter._client_sync import fetch_trust_release
+
+        release = fetch_trust_release(trust_release_url)
+    release_obj = release
     if isinstance(release_obj, TrustRelease):
         image_digest = release_obj.image_digest
         accepted_image_digests = tuple(release_obj.accepted_image_digests)
