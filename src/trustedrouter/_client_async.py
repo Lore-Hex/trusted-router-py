@@ -70,6 +70,9 @@ from trustedrouter.models import (
     ResponseObject,
 )
 
+from ._verified_transport import AsyncVerifiedClient, AsyncVerifiedTransport
+from .attestation import AttestationPolicy
+
 
 class AsyncTrustedRouter:
     """Async variant. Same surface as TrustedRouter but every method is a
@@ -88,6 +91,7 @@ class AsyncTrustedRouter:
         verify: bool | str = True,
         workspace_id: str | None = None,
         client: httpx.AsyncClient | None = None,
+        gateway_policy: AttestationPolicy | None = None,
         max_retries: int = 2,
         regional_failover: bool = True,
         telemetry: bool | None = None,
@@ -150,6 +154,13 @@ class AsyncTrustedRouter:
         # Auth and request hooks, which are the only writers the per-attempt
         # scrub above cannot see. Marked SDK requests only.
         _install_reserved_header_hook(self._client, is_async=True)
+        self._verified = (
+            AsyncVerifiedClient(transport=AsyncVerifiedTransport(gateway_policy), timeout=timeout,
+                              headers=default_headers, trust_env=False, follow_redirects=False)
+            if gateway_policy is not None else None
+        )
+        if self._verified is not None:
+            _install_reserved_header_hook(self._verified, is_async=True)
         self._pool = AsyncBaseUrlPool(
             lambda: self._client,
             self.base_url,
@@ -160,6 +171,8 @@ class AsyncTrustedRouter:
     async def aclose(self) -> None:
         if self._owns_telemetry_reporter and isinstance(self._telemetry_sink, TelemetryReporter):
             self._telemetry_sink.close()
+        if self._verified is not None:
+            await self._verified.aclose()
         if self._owns_client:
             await self._client.aclose()
 
@@ -269,7 +282,8 @@ class AsyncTrustedRouter:
         )
         return _json_or_raise(
             await arequest_with_retry(
-                self._client, controller, method, path, kwargs, recorder=recorder
+                (self._verified or self._client) if _base_url is None else self._client,
+                controller, method, path, kwargs, recorder=recorder,
             )
         )
 
@@ -393,7 +407,7 @@ class AsyncTrustedRouter:
             timeout=timeout,
         )
         async for item in astream_events(
-            self._client, controller, build_request, iter_body, recorder=recorder
+            self._verified or self._client, controller, build_request, iter_body, recorder=recorder
         ):
             yield item
 
@@ -437,7 +451,7 @@ class AsyncTrustedRouter:
             timeout=timeout,
         )
         async for item in astream_events(
-            self._client, controller, build_request, iter_body, recorder=recorder
+            self._verified or self._client, controller, build_request, iter_body, recorder=recorder
         ):
             yield item
 
@@ -478,7 +492,7 @@ class AsyncTrustedRouter:
             timeout=timeout,
         )
         async for item in astream_events(
-            self._client, controller, build_request, iter_body, recorder=recorder
+            self._verified or self._client, controller, build_request, iter_body, recorder=recorder
         ):
             yield item
 
@@ -519,7 +533,8 @@ class AsyncTrustedRouter:
         chunks = [
             chunk
             async for chunk in astream_events(
-                self._client, controller, build_request, iter_body, recorder=recorder
+                self._verified or self._client, controller,
+                build_request, iter_body, recorder=recorder,
             )
         ]
         return ChatCompletion.model_validate(_collect_completion(chunks))
@@ -760,7 +775,7 @@ class AsyncTrustedRouter:
             timeout=timeout,
         )
         async for event in astream_events(
-            self._client,
+            self._verified or self._client,
             controller,
             build_request,
             _aiter_sse_events,
@@ -810,7 +825,7 @@ class AsyncTrustedRouter:
             timeout=timeout,
         )
         async for chunk in astream_events(
-            self._client, controller, build_request, iter_body, recorder=recorder
+            self._verified or self._client, controller, build_request, iter_body, recorder=recorder
         ):
             yield chunk
 

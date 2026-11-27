@@ -249,6 +249,8 @@ def _read_http_response(
     response = bytearray()
     while b"\r\n\r\n" not in response:
         response.extend(_recv_or_fail(conn, raw, context, deadline=deadline))
+        if len(response.split(b"\r\n\r\n", 1)[0]) > 65536:
+            raise AttestationVerificationError("attestation response headers too large")
     header, sep, rest = bytes(response).partition(b"\r\n\r\n")
     if sep == b"":
         raise AttestationVerificationError(
@@ -284,10 +286,14 @@ def _read_http_response(
         raise AttestationVerificationError(
             f"{context} HTTP response had negative Content-Length"
         )
+    if "transfer-encoding" in headers or content_length > 1024 * 1024:
+        raise AttestationVerificationError("unsupported attestation response framing")
     body = bytearray(rest)
     while len(body) < content_length:
         body.extend(_recv_or_fail(conn, raw, context, deadline=deadline))
-    return status_line, headers, bytes(body[:content_length])
+    if len(body) != content_length:
+        raise AttestationVerificationError("unexpected bytes after attestation response")
+    return status_line, headers, bytes(body)
 
 
 def _connection_close_requested(headers: Mapping[str, str]) -> bool:

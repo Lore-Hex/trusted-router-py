@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0
+
+- Confidential and Trusted chat require an image-pinned gateway policy and use
+  the same GCP-attested TLS session for the prompt. This includes asynchronous
+  clients, streaming and retries. AWS and Azure verification are not supported
+  by this transport. Standard and control-plane requests remain available.
+
 ## 0.10.1
 
 - Renamed the SDK distribution to `trustedrouter`; `trusted-router-py` is

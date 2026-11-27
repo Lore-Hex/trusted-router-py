@@ -70,7 +70,7 @@ def test_module_identity(first: str) -> None:
         assert isinstance(AttestationVerificationError("test"),
                           trustedrouter.AttestationVerificationError)
         assert trusted_router.__main__.main(["--version"]) == 0
-    ''', first) == "trustedrouter 0.10.1\n"
+    ''', first) == "trustedrouter 0.11.0\n"
 
 
 def test_missing_submodule() -> None:
@@ -671,7 +671,7 @@ def test_zip_cli(tmp_path: Path, module: str) -> None:
     with zipfile.ZipFile(archive, "w") as zipped:
         for path in SRC.rglob("*.py"):
             zipped.write(path, path.relative_to(SRC))
-    assert run_python(["-m", module, "--version"], paths=[archive]) == "trustedrouter 0.10.1\n"
+    assert run_python(["-m", module, "--version"], paths=[archive]) == "trustedrouter 0.11.0\n"
 
 
 def test_missing_submodule_spec() -> None:
@@ -691,7 +691,7 @@ def test_missing_submodule_spec() -> None:
 
 @pytest.mark.parametrize("module", ["trustedrouter", "trusted_router", "trusted_router.__main__"])
 def test_cli(module: str) -> None:
-    assert run_python(["-m", module, "--version"]) == "trustedrouter 0.10.1\n"
+    assert run_python(["-m", module, "--version"]) == "trustedrouter 0.11.0\n"
 
 
 def test_both_packages_configured() -> None:

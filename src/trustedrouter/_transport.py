@@ -64,6 +64,8 @@ from trustedrouter._requests import _RESERVED_MARKER, _strip_reserved_headers
 from trustedrouter._retry import RetryController, _retryable, _should_retry_header
 from trustedrouter._telemetry import RequestRecorder
 
+from ._verified_transport import require_verified
+
 T = TypeVar("T")
 
 _REPLAY_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
@@ -155,6 +157,7 @@ def request_with_retry(
                 recorder.begin_attempt(base_url)
             _apply_reserved_headers(kwargs, recorder)
             try:
+                require_verified(client, url, kwargs)
                 response = client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
                 if recorder is not None:
@@ -221,6 +224,7 @@ async def arequest_with_retry(
                 recorder.begin_attempt(base_url)
             _apply_reserved_headers(kwargs, recorder)
             try:
+                require_verified(client, url, kwargs)
                 response = await client.request(method, url, **kwargs)
             except httpx.TransportError as exc:
                 if recorder is not None:
@@ -294,6 +298,7 @@ def stream_events(
             response_opened = False
             body_started = False
             try:
+                require_verified(client, base_url, req)
                 with client.stream(**req) as response:
                     response_opened = True
                     if recorder is not None:
@@ -384,6 +389,7 @@ async def astream_events(
             response_opened = False
             body_started = False
             try:
+                require_verified(client, base_url, req)
                 async with client.stream(**req) as response:
                     response_opened = True
                     if recorder is not None:
