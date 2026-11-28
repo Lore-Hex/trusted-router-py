@@ -391,6 +391,11 @@ def _read_attestation(
     return body
 
 
+def _require_nitro_tls13(connection: Any) -> None:
+    if connection.get_protocol_version_name() != "TLSv1.3":
+        raise AttestationVerificationError("Nitro attestation requires negotiated TLS 1.3")
+
+
 def verify_gateway_session(
     *,
     base_url: str,
@@ -404,6 +409,10 @@ def verify_gateway_session(
     SSL, crypto = _load_pyopenssl()
     host, port, host_header = _parse_base_url(base_url)
     ctx = _new_pyopenssl_context()
+    if policy.expected_nitro_pcr0s:
+        # Match the gateway verifier's ClientHello. Still require TLS 1.3
+        # before sending the first HTTP byte, including the public challenge.
+        ctx.set_min_proto_version(SSL.TLS1_2_VERSION)
     deadline = time.monotonic() + timeout
     raw: socket.socket | None = None
     conn: Any | None = None
@@ -420,6 +429,8 @@ def verify_gateway_session(
             timeout=_tls_timeout_remaining(deadline, "handshake"),
             what="handshake",
         )
+        if policy.expected_nitro_pcr0s:
+            _require_nitro_tls13(conn)
         peer = conn.get_peer_certificate()
         _require_peer_certificate(peer)
         leaf_der = crypto.dump_certificate(crypto.FILETYPE_ASN1, peer)

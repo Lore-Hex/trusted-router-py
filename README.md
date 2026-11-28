@@ -366,8 +366,7 @@ Full flow, endpoints, and security notes:
 
 ## Attestation verification (the differentiator)
 
-Every TrustedRouter response is generated inside a Google Confidential Space
-workload. The gateway's `/attestation` endpoint mints a Google-signed JWT
+On the GCP gateway, the `/attestation` endpoint mints a Google-signed JWT
 that commits to the workload image digest, image reference, your nonce, the
 TLS leaf cert SHA-256, and the TLS exporter of the session that asked for it.
 Verifying it proves the token came from the exact build the trust page
@@ -434,7 +433,49 @@ or `trustedrouter attest --session`; a certificate from a separate connection
 does not establish that binding.
 
 This codepath needs `cryptography`; install with
-`pip install trustedrouter[attestation]`.
+`pip install 'trustedrouter[attestation]'`.
+
+**AWS Nitro.** Pin the reviewed EIF's non-debug PCR0 from your release approval.
+The verifier checks the raw COSE signature against AWS Nitro Root-G1, certificate
+chain, challenge, TLS leaf/key and current TLS 1.3 exporter before inference.
+It does not accept a GCP JWT in place of Nitro evidence. This is evidence for
+the gateway enclave, not for a downstream provider's GPU.
+
+```python
+import os
+from trustedrouter import TrustedRouter
+from trustedrouter.attestation import AttestationPolicy
+
+policy = AttestationPolicy(expected_nitro_pcr0s=(os.environ["APPROVED_AWS_PCR0"],))
+with TrustedRouter(api_key=os.environ["TR_API_KEY"],
+                   base_url="https://api-aws.trustedrouter.com/v1",
+                   gateway_policy=policy) as client:
+    pass  # Inference requests use the verified connection.
+```
+
+**Signed GCP policy.** Install `trustedrouter[attestation,provenance]` and use
+`policy_from_signed_gcp_release` instead of the unsigned trust-release helper.
+Fetch [the policy](https://trust.trustedrouter.com/gcp/stage-d-accepted.json)
+and [its Sigstore bundle](https://trust.trustedrouter.com/gcp/stage-d-accepted.json.bundle).
+Obtain the policy SHA-256 and the approved image digest independently, for example
+from your reviewed deployment configuration. Do not calculate your trusted pins
+from those same downloads.
+
+```python
+from pathlib import Path
+from trustedrouter.attestation import policy_from_signed_gcp_release
+
+policy = policy_from_signed_gcp_release(
+    Path("stage-d-accepted.json").read_bytes(), Path("stage-d-accepted.json.bundle").read_bytes(),
+    expected_policy_sha256=os.environ["APPROVED_POLICY_SHA256"],
+    expected_image_digest=os.environ["APPROVED_GCP_IMAGE_DIGEST"],
+)
+```
+
+This verifies the release workflow's identity, signature and transparency-log
+proof, then pins **only** the chosen image. It does not independently rebuild
+the image or verify a raw GCP hardware quote. Rotate both pins through your
+release process; an immutable checkpoint alone does not discover revocations.
 
 ## Receipt verification
 

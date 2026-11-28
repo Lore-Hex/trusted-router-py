@@ -19,7 +19,7 @@ from trustedrouter import (
 def respond(request: httpx.Request) -> httpx.Response:
     assert request.url.path == "/v1/chat/completions"
     installed_version = version("trustedrouter")
-    assert installed_version == __version__ == "0.11.0"
+    assert installed_version == __version__ == "0.12.0"
     assert request.headers["user-agent"].split()[0] == f"trusted-router-py/{installed_version}"
     return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=(
         b'data: {"id":"consumer","choices":[{"index":0,"delta":'
