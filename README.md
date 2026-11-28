@@ -462,6 +462,7 @@ from your reviewed deployment configuration. Do not calculate your trusted pins
 from those same downloads.
 
 ```python
+import os
 from pathlib import Path
 from trustedrouter.attestation import policy_from_signed_gcp_release
 

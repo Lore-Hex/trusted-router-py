@@ -365,9 +365,29 @@ def examples() -> list[tuple[str, str, str]]:
     return found
 
 
+@pytest.fixture(scope="session")
+def verified_examples(installed: Installed) -> tuple[str, dict[str, str]]:
+    # Keep all existing base-install tests in their own dependency-minimal environment.
+    venv = installed.root / "verified-venv"
+    require_success(installed.call([UV, "venv", "--python", sys.executable, str(venv)]))
+    python = str(venv / "bin/python")
+    require_success(installed.call([
+        UV, "pip", "install", "--python", python, f"{installed.wheel}[attestation,provenance]",
+    ]))
+    for filename in ("stage-d-accepted.json", "stage-d-accepted.json.bundle"):
+        shutil.copyfile(ROOT / "tests/fixtures" / filename, installed.root / filename)
+    return python, {
+        "TR_API_KEY": "test", "APPROVED_AWS_PCR0": "12" * 48,
+        "APPROVED_POLICY_SHA256":
+            "33011aa4a6d7629b3bd53091e2b9315b3e9a6e5e6b5d642241859b539f1447d7",
+        "APPROVED_GCP_IMAGE_DIGEST":
+            "sha256:b2a25b3e06a43927dd8f4ed194d6878543647fe542b279a8512ec53c4e24c016",
+    }
+
+
 @pytest.mark.parametrize("location,language,source", examples(), ids=lambda value: value[:80])
 def test_documented_examples(
-    installed: Installed, location: str, language: str, source: str,
+    installed: Installed, location: str, language: str, source: str, request: pytest.FixtureRequest,
 ) -> None:
     if language == "python":
         compile(source, location, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
@@ -395,8 +415,15 @@ async def my_cert_pin_hook(response):
             source = "async def example():\n" + "".join(
                 "    " + line + "\n" for line in source.splitlines()
             ) + "\nasyncio.run(example())\n"
+        python, env = installed.python, {}
+        if "APPROVED_AWS_PCR0" in source or "APPROVED_POLICY_SHA256" in source:
+            python, env = request.getfixturevalue("verified_examples")
+            # No live Sigstore network dependency; verify against the bundled public roots.
+            prelude += ("from sigstore.verify import Verifier\n"
+                        "production = Verifier.production\n"
+                        "Verifier.production = lambda: production(offline=True)\n")
         runner.write_text(prelude + source + "\n")
-        require_success(installed.call([installed.python, str(runner)]))
+        require_success(installed.call([python, str(runner)], env=env))
     elif language in ("sh", "bash"):
         # Installation/development commands are syntax checked, never recursively executed.
         require_success(installed.call(["/bin/bash", "-n"], stdin=source))
