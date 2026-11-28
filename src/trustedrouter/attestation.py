@@ -101,6 +101,16 @@ class AttestationPolicy:
     expected_image_reference: str | None = None
     expected_image_references: tuple[str, ...] = ()
     allow_debug: bool = False
+    expected_nitro_pcr0s: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.expected_nitro_pcr0s and (
+            not isinstance(self.expected_nitro_pcr0s, tuple)
+            or self.pins_image_identity or self.allow_debug or self.gcp_audience != "quill-cloud"
+            or not all(isinstance(pin, str) and re.fullmatch(r"[a-f0-9]{96}", pin)
+                       and pin != "0" * 96 for pin in self.expected_nitro_pcr0s)
+        ):
+            raise AttestationVerificationError("Nitro requires a separate non-debug PCR0 policy")
 
     @property
     def pins_image_identity(self) -> bool:
@@ -635,6 +645,22 @@ def _verified_jwt_claims(
     return payload
 
 
+def policy_from_signed_gcp_release(
+    document: bytes, bundle: bytes, *, expected_policy_sha256: str, expected_image_digest: str,
+) -> AttestationPolicy:
+    """Verify a Sigstore-signed GCP release policy and authorize only the selected image.
+
+    Both pins must come from the caller's approved release, not from this download.
+    An immutable policy checkpoint prevents replay of a different validly signed policy.
+    Install the provenance extra; missing trust evidence never falls back to unsigned JSON.
+    """
+    from trustedrouter._release_provenance import verify_signed_gcp_release
+
+    return verify_signed_gcp_release(
+        document, bundle, expected_policy_sha256, expected_image_digest,
+    )
+
+
 def verify_gateway_attestation(
     document: bytes,
     *,
@@ -645,7 +671,9 @@ def verify_gateway_attestation(
     jwks: Mapping[str, Any] | None = None,
     jwks_url: str = GCP_JWKS_URI,
 ) -> GatewayAttestation:
-    """Verify a GCP Confidential Space attestation JWT.
+    """Verify a GCP Confidential Space JWT or, with explicit PCR0 pins, AWS Nitro COSE.
+
+    Nitro requires all three live channel bindings: nonce, TLS leaf, and TLS exporter.
 
     `document` is the raw bytes returned by `client.attestation()`.
     `policy` says which image_digest / image_reference / cert_sha256
@@ -674,6 +702,10 @@ def verify_gateway_attestation(
     connection evidence was checked. Raises AttestationVerificationError
     on any failure — never returns False or None for a failed
     verification."""
+    if policy.expected_nitro_pcr0s:
+        from trustedrouter._nitro import verify_nitro_session
+
+        return verify_nitro_session(document, policy, nonce_hex, tls_cert_der, tls_exporter)
     payload = _verified_jwt_claims(document, jwks=jwks, jwks_url=jwks_url)
     return _check_claims(
         payload,

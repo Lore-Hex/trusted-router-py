@@ -23,14 +23,14 @@ SOURCES = {
     "__init__.py", "__main__.py", "_client_async.py", "_client_sync.py", "_collect.py",
     "_constants.py", "_errors.py", "_headers.py", "_orchestration.py", "_requests.py",
     "_retry.py", "_routing.py", "_sse.py", "_telemetry.py", "_transport.py",
-    "_verified_transport.py",
+    "_verified_transport.py", "_nitro.py", "_release_provenance.py",
     "attestation.py", "client.py", "models.py", "oauth.py", "py.typed", "receipts.py", "session.py",
 }
 ALIAS_SOURCES = {
     "__init__.py", "py.typed", "attestation.pyi", "client.pyi", "models.pyi", "oauth.pyi",
     "receipts.pyi", "session.pyi",
 }
-DIST = "trustedrouter-0.11.0"
+DIST = "trustedrouter-0.12.0"
 UV = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
 
 
@@ -121,8 +121,10 @@ def test_artifact_metadata(installed: Installed) -> None:
     with zipfile.ZipFile(installed.wheel) as wheel:
         metadata = BytesParser().parsebytes(wheel.read(f"{DIST}.dist-info/METADATA"))
         assert metadata["Name"] == "trustedrouter"
-        assert metadata["Version"] == "0.11.0"
-        assert set(metadata.get_all("Provides-Extra", [])) == {"attestation", "receipts"}
+        assert metadata["Version"] == "0.12.0"
+        assert set(metadata.get_all("Provides-Extra", [])) == {
+            "attestation", "receipts", "provenance",
+        }
         assert wheel.read(f"{DIST}.dist-info/entry_points.txt").decode() == (
             "[console_scripts]\ntrustedrouter = trustedrouter.__main__:main\n"
         )
@@ -196,7 +198,7 @@ def test_installed_telemetry_version(installed: Installed) -> None:
     require_success(installed.call([installed.python, "-c", """
 from importlib.metadata import version
 from trustedrouter._telemetry import sdk_identity
-assert sdk_identity()['version'] == version('trustedrouter') == '0.11.0'
+assert sdk_identity()['version'] == version('trustedrouter') == '0.12.0'
 """]))
 
 
@@ -241,8 +243,8 @@ class Case:
 
 
 CASES = [
-    Case("version", ["--version"], "trustedrouter 0.11.0"),
-    Case("version-json", ["--json", "--version"], "0.11.0", command="version"),
+    Case("version", ["--version"], "trustedrouter 0.12.0"),
+    Case("version-json", ["--json", "--version"], "0.12.0", command="version"),
     Case("unknown", ["--json", "unknown"], "usage_error", 2),
     Case("missing-command", ["--json"], "usage_error", 2),
     Case("retries-invalid", ["--json", "--retries", "-1", "models"], "usage_error", 2),
@@ -363,9 +365,29 @@ def examples() -> list[tuple[str, str, str]]:
     return found
 
 
+@pytest.fixture(scope="session")
+def verified_examples(installed: Installed) -> tuple[str, dict[str, str]]:
+    # Keep all existing base-install tests in their own dependency-minimal environment.
+    venv = installed.root / "verified-venv"
+    require_success(installed.call([UV, "venv", "--python", sys.executable, str(venv)]))
+    python = str(venv / "bin/python")
+    require_success(installed.call([
+        UV, "pip", "install", "--python", python, f"{installed.wheel}[attestation,provenance]",
+    ]))
+    for filename in ("stage-d-accepted.json", "stage-d-accepted.json.bundle"):
+        shutil.copyfile(ROOT / "tests/fixtures" / filename, installed.root / filename)
+    return python, {
+        "TR_API_KEY": "test", "APPROVED_AWS_PCR0": "12" * 48,
+        "APPROVED_POLICY_SHA256":
+            "33011aa4a6d7629b3bd53091e2b9315b3e9a6e5e6b5d642241859b539f1447d7",
+        "APPROVED_GCP_IMAGE_DIGEST":
+            "sha256:b2a25b3e06a43927dd8f4ed194d6878543647fe542b279a8512ec53c4e24c016",
+    }
+
+
 @pytest.mark.parametrize("location,language,source", examples(), ids=lambda value: value[:80])
 def test_documented_examples(
-    installed: Installed, location: str, language: str, source: str,
+    installed: Installed, location: str, language: str, source: str, request: pytest.FixtureRequest,
 ) -> None:
     if language == "python":
         compile(source, location, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
@@ -393,8 +415,15 @@ async def my_cert_pin_hook(response):
             source = "async def example():\n" + "".join(
                 "    " + line + "\n" for line in source.splitlines()
             ) + "\nasyncio.run(example())\n"
+        python, env = installed.python, {}
+        if "APPROVED_AWS_PCR0" in source or "APPROVED_POLICY_SHA256" in source:
+            python, env = request.getfixturevalue("verified_examples")
+            # No live Sigstore network dependency; verify against the bundled public roots.
+            prelude += ("from sigstore.verify import Verifier\n"
+                        "production = Verifier.production\n"
+                        "Verifier.production = lambda: production(offline=True)\n")
         runner.write_text(prelude + source + "\n")
-        require_success(installed.call([installed.python, str(runner)]))
+        require_success(installed.call([python, str(runner)], env=env))
     elif language in ("sh", "bash"):
         # Installation/development commands are syntax checked, never recursively executed.
         require_success(installed.call(["/bin/bash", "-n"], stdin=source))

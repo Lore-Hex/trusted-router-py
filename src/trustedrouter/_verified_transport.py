@@ -53,6 +53,8 @@ def private_requested(url: str, body: object) -> bool:
 
 
 def check_policy(policy: AttestationPolicy) -> AttestationPolicy:
+    if policy.expected_nitro_pcr0s:
+        return policy
     pins = policy.expected_image_digests or (policy.expected_image_digest,)
     if policy.allow_debug or not all(p and re.fullmatch(r"sha256:[a-f0-9]{64}", p) for p in pins):
         raise AttestationVerificationError("private inference requires non-debug sha256 image pins")

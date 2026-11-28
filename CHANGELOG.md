@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.0
+
+- Verify AWS Nitro hardware evidence on the inference TLS connection using an
+  explicit non-debug PCR0 pin. GCP and Nitro policies cannot silently substitute
+  for one another.
+- Verify Sigstore-signed GCP accepted-image policies against an independent
+  checkpoint and bind the connection policy to one reviewed image. This checks
+  release provenance, not independent build reproducibility.
+
 ## 0.11.0
 
 - Confidential and Trusted chat require an image-pinned gateway policy and use
